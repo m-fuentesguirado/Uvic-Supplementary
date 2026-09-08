@@ -1,0 +1,2210 @@
+---
+title: "Targeted-panel sequencing QC"
+author: "Miriam Fuentes"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: false
+    code_folding: show
+    theme: cosmo
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+# Setup
+
+```{r setup, include=FALSE}
+#Chunk options
+knitr::opts_chunk$set(echo = TRUE,warning = FALSE,message = FALSE,fig.width = 8,fig.height = 5,fig.align = "center")
+
+#Packages
+library(knitr)
+library(tidyverse)
+library(DT)
+library(writexl)
+library(ggVennDiagram)
+library(pheatmap)
+library(wesanderson)
+library(ggnewscale)
+library(scales)
+library(gt)
+library(patchwork)
+library(viridis)
+
+#Figure style
+source(file.path("..","..","nextflow_integrator","unified_figures.R"))
+```
+
+# 1 Sequencing yield
+
+## 1.1 Prepare sequencing-yield input
+
+```bash
+mkdir -p qc_thesis
+
+awk -F '\t' '
+BEGIN {OFS="\t"}
+NR==1 || $2!="1452"
+' qc_thesis/sequencing_yield.tsv \
+> qc_thesis/sequencing_yield_thesis.tsv
+
+echo "Samples:"
+awk 'END {print NR-1}' qc_thesis/sequencing_yield_thesis.tsv
+
+echo "Patient 1452 rows:"
+awk -F '\t' '$2=="1452"' qc_thesis/sequencing_yield_thesis.tsv
+```
+
+## 1.2 Load sequencing-yield data
+
+```{r load-sequencing-yield}
+path <- file.path("..","..","nextflow_integrator","multiqc","qc_data")
+
+list.files(path)
+
+qc_yield <- read.delim(file.path(path,"sequencing_yield_thesis.tsv"),sep="\t",header=TRUE,colClasses="character")
+
+dim(qc_yield)
+head(qc_yield)
+```
+
+## 1.3 Prepare sequencing-yield data
+
+```{r prepare-sequencing-yield}
+yield_data <- qc_yield %>%
+  filter(patient!="1452") %>%
+  mutate(read_pairs=as.numeric(read_pairs),read_pairs_million=read_pairs/1000000,sample_group="Patient samples")
+yield_data %>%
+  count(sample_group)
+yield_summary <- yield_data %>%
+  summarise(
+    samples=n(),
+    median=median(read_pairs_million,na.rm=TRUE),
+    IQR=IQR(read_pairs_million,na.rm=TRUE),
+    minimum=min(read_pairs_million,na.rm=TRUE),
+    maximum=max(read_pairs_million,na.rm=TRUE))
+
+yield_summary
+```
+
+## 1.4 Sequencing-yield plot
+
+```{r plot-sequencing-yield}
+figure_1<-ggplot(yield_data,aes(x=sample_group,y=read_pairs_million))+
+  geom_boxplot(width=0.4,outlier.shape=NA,fill="darkcyan",alpha=0.7)+
+  geom_jitter(width=0.08,size=2,alpha=0.7)+
+  labs(x="",y="Sequencing yield (million read pairs)")+
+  theme_classic(base_size=14)
+
+figure_1
+```
+
+## 1.5 Mapping performance
+
+```{r mapping-performance}
+mapping_summary<-qc_yield %>%
+    filter(patient!="1452") %>%
+    mutate(mapped_percent=as.numeric(mapped_percent),properly_paired_percent=as.numeric(properly_paired_percent)) %>%
+    summarise(
+      samples=n(),
+      mapped_median=median(mapped_percent,na.rm=TRUE),
+      mapped_Q1=quantile(mapped_percent,0.25,na.rm=TRUE),
+      mapped_Q3=quantile(mapped_percent,0.75,na.rm=TRUE),
+      mapped_minimum=min(mapped_percent,na.rm=TRUE),
+      mapped_maximum=max(mapped_percent,na.rm=TRUE),
+      properly_paired_median=median(properly_paired_percent,na.rm=TRUE),
+      properly_paired_Q1=quantile(properly_paired_percent,0.25,na.rm=TRUE),
+      properly_paired_Q3=quantile(properly_paired_percent,0.75,na.rm=TRUE),
+      properly_paired_minimum=min(properly_paired_percent,na.rm=TRUE),
+      properly_paired_maximum=max(properly_paired_percent,na.rm=TRUE))
+
+mapping_table <- tibble(
+  Metric=c("Mapped reads","Properly paired reads"),
+  Median=c(mapping_summary$mapped_median,mapping_summary$properly_paired_median),
+  `IQR (Q1-Q3)`=c(
+    sprintf("%.2f-%.2f",mapping_summary$mapped_Q1,mapping_summary$mapped_Q3),
+    sprintf(
+      "%.2f-%.2f",
+      mapping_summary$properly_paired_Q1,
+      mapping_summary$properly_paired_Q3)),
+  Range=c(
+    sprintf("%.2f-%.2f",mapping_summary$mapped_minimum,mapping_summary$mapped_maximum),
+    sprintf(
+      "%.2f-%.2f",
+      mapping_summary$properly_paired_minimum,
+      mapping_summary$properly_paired_maximum)))
+
+mapping_gt<-mapping_table %>%
+    gt() %>%
+    tab_header(title=md("**Raw-read mapping performance**"),subtitle="Patient plasma samples (n = 104)") %>%
+    cols_label(Metric="QC metric",Median="Median (%)",`IQR (Q1-Q3)`="IQR (%)",Range="Range (%)") %>%
+    fmt_number(columns=Median,decimals=2) %>%
+    cols_align(align="left",columns=Metric) %>%
+    cols_align(align="center",columns=c(Median,`IQR (Q1-Q3)`,Range)) %>%
+    tab_style(style=cell_text(weight="bold"),locations=cells_column_labels()) %>%
+    tab_style(style=cell_text(weight="bold"),locations=cells_body(columns=Metric)) %>%
+    tab_source_note(source_note=md("*Values were calculated from the raw mapped BAM files.*")) %>%
+    tab_options(
+      table.font.size=11,
+      heading.align="left",
+      heading.title.font.size=14,
+      heading.subtitle.font.size=11,
+      column_labels.background.color="#DCE6EF",
+      column_labels.padding=6,
+      data_row.padding=6,
+      table.border.top.color="#334E68",
+      table.border.top.width=px(2),
+      table.border.bottom.color="#334E68",
+      table.border.bottom.width=px(2))
+
+  mapping_gt
+```
+
+# 2 Mean target coverage
+
+## 2.1 Prepare HsMetrics input
+
+```bash
+ROOT=results_bam_to_dx_batches
+ALL=qc_thesis/hsmetrics.tsv
+THESIS=qc_thesis/hsmetrics_thesis.tsv
+
+printf 'sample\tpatient\tendpoint\tstage\tmean_target_coverage\tmedian_target_coverage\tpct_selected_bases\tfold_80_base_penalty\tzero_cvg_targets_pct\tpct_target_bases_10x\tpct_target_bases_20x\tpct_target_bases_50x\tpct_target_bases_100x\tpct_target_bases_250x\tpct_target_bases_500x\tpct_target_bases_1000x\n' > "$ALL"
+
+for file in $(find "$ROOT" -type f \( \
+    -name '*_raw_mapped.CollectHsMetrics.coverage_metrics' -o \
+    -name '*_dx_mapped.CollectHsMetrics.coverage_metrics' \)); do
+
+    name=$(basename "$file")
+
+    if [[ "$name" == *_raw_mapped.CollectHsMetrics.coverage_metrics ]]; then
+        sample=${name%_raw_mapped.CollectHsMetrics.coverage_metrics}
+        stage="Raw"
+    else
+        sample=${name%_dx_mapped.CollectHsMetrics.coverage_metrics}
+        stage="Duplex"
+    fi
+
+    patient=${sample%_*}
+    endpoint=${sample##*_}
+
+    awk -F '\t' \
+        -v sample="$sample" \
+        -v patient="$patient" \
+        -v endpoint="$endpoint" \
+        -v stage="$stage" '
+    BEGIN {OFS="\t"}
+
+    /^#/ || NF==0 {next}
+
+    header==0 {
+        for(i=1;i<=NF;i++) column[$i]=i
+        header=1
+        next
+    }
+
+    header==1 {
+        print sample,
+              patient,
+              endpoint,
+              stage,
+              get_value("MEAN_TARGET_COVERAGE"),
+              get_value("MEDIAN_TARGET_COVERAGE"),
+              get_value("PCT_SELECTED_BASES"),
+              get_value("FOLD_80_BASE_PENALTY"),
+              get_value("ZERO_CVG_TARGETS_PCT"),
+              get_value("PCT_TARGET_BASES_10X"),
+              get_value("PCT_TARGET_BASES_20X"),
+              get_value("PCT_TARGET_BASES_50X"),
+              get_value("PCT_TARGET_BASES_100X"),
+              get_value("PCT_TARGET_BASES_250X"),
+              get_value("PCT_TARGET_BASES_500X"),
+              get_value("PCT_TARGET_BASES_1000X")
+        exit
+    }
+
+    function get_value(name) {
+        if(name in column) return $(column[name])
+        return "NA"
+    }' "$file" >> "$ALL"
+done
+
+#Remove patient 1452
+awk -F '\t' '
+BEGIN {OFS="\t"}
+NR==1 || $2!="1452"
+' "$ALL" > "$THESIS"
+
+echo "HsMetrics counts:"
+
+awk -F '\t' '
+NR>1 {count[$4]++}
+END {
+    print "Raw:",count["Raw"]
+    print "Duplex:",count["Duplex"]
+    print "Total:",NR-1
+}' "$THESIS"
+
+echo
+echo "First rows:"
+head -n 5 "$THESIS"
+
+echo
+ls -lh "$THESIS"
+```
+
+## 2.2 Load HsMetrics
+
+```{r load-hsmetrics}
+hsmetrics_file <- file.path(path,"hsmetrics.tsv")
+
+hsmetrics <- read.delim(hsmetrics_file,sep="\t",header=TRUE,colClasses="character")
+
+hsmetrics <- hsmetrics %>%
+  filter(patient!="1452")
+
+dim(hsmetrics)
+
+hsmetrics %>%
+  count(stage)
+```
+
+## 2.3 Coverage summary
+
+```{r prepare-mean-coverage}
+coverage_data <- hsmetrics %>%
+  mutate(
+    mean_target_coverage=as.numeric(mean_target_coverage),
+    stage=factor(
+      stage,
+      levels=c("Raw","Duplex"),
+      labels=c("Raw reads","Duplex consensus")))
+sum(is.na(coverage_data$mean_target_coverage))
+coverage_data %>%
+  count(sample) %>%
+  filter(n!=2)
+```
+
+```{r summarise-mean-coverage}
+coverage_summary <- coverage_data %>%
+  group_by(stage) %>%
+  summarise(
+    samples=n(),
+    median=median(mean_target_coverage,na.rm=TRUE),
+    IQR=IQR(mean_target_coverage,na.rm=TRUE),
+    minimum=min(mean_target_coverage,na.rm=TRUE),
+    maximum=max(mean_target_coverage,na.rm=TRUE),
+    .groups="drop")
+
+coverage_summary
+
+coverage_summary %>%
+  mutate(across(c(median,IQR,minimum,maximum),~round(.x,1)))
+```
+
+## 2.4 Coverage plot
+
+```{r plot-mean-coverage}
+coverage_colours<-c("Raw reads"="grey65","Duplex consensus"="darkcyan")
+
+figure_2<-ggplot(coverage_data,aes(x=stage,y=mean_target_coverage,fill=stage))+
+  geom_boxplot(width=0.5,outlier.shape=NA,alpha=0.7)+
+  geom_jitter(width=0.08,size=2,alpha=0.7)+
+  scale_fill_manual(values=coverage_colours)+
+  scale_y_log10(labels=scales::label_comma())+
+  labs(x="",y="Mean target coverage (×, log scale)")+
+  theme_classic(base_size=14)+
+  theme(legend.position="none")
+
+figure_2
+```
+
+# 3 Target coverage breadth
+
+## 3.1 Prepare data
+
+```{r inspect-breadth-columns}
+names(hsmetrics)[grepl("^pct_target_bases_",names(hsmetrics))]
+
+breadth_data <- hsmetrics %>%
+  mutate(
+    stage=factor(stage,levels=c("Raw","Duplex"),labels=c("Raw reads","Duplex consensus")),
+    across(
+      starts_with("pct_target_bases_"),
+      as.numeric))
+breadth_data %>%
+  count(stage)
+```
+
+```{r prepare-coverage-breadth}
+breadth_long <- hsmetrics %>%
+  mutate(
+    stage=factor(stage,levels=c("Raw","Duplex"),labels=c("Raw reads","Duplex consensus")),
+    across(
+      starts_with("pct_target_bases_"),
+      as.numeric)) %>%
+  select(sample,stage,starts_with("pct_target_bases_")) %>%
+  pivot_longer(cols=starts_with("pct_target_bases_"),names_to="threshold",values_to="breadth") %>%
+  mutate(coverage_threshold=parse_number(threshold),breadth_percent=breadth*100)
+dim(breadth_long)
+breadth_long %>%count(stage,coverage_threshold)
+head(breadth_long)
+range(breadth_long$breadth_percent,na.rm=TRUE)
+```
+
+## 3.2 Coverage-breadth summary
+
+```{r summarise-coverage-breadth}
+breadth_summary <- breadth_long %>%
+  group_by(stage,coverage_threshold) %>%
+  summarise(
+    samples=n(),
+    median=median(breadth_percent,na.rm=TRUE),
+    lower_IQR=quantile(breadth_percent,0.25,na.rm=TRUE),
+    upper_IQR=quantile(breadth_percent,0.75,na.rm=TRUE),
+    minimum=min(breadth_percent,na.rm=TRUE),
+    maximum=max(breadth_percent,na.rm=TRUE),
+    .groups="drop")
+breadth_summary %>%
+  mutate(across(c(median,lower_IQR,upper_IQR,minimum,maximum),~round(.x,1)))
+```
+
+## 3.3 Coverage-breadth plot
+
+```{r plot-coverage-breadth}
+breadth_colours<-c("Raw reads"="grey35","Duplex consensus"="darkcyan")
+
+figure_3<-ggplot(breadth_summary,aes(x=coverage_threshold,y=median,colour=stage,fill=stage,group=stage))+
+  geom_ribbon(aes(ymin=lower_IQR,ymax=upper_IQR),alpha=0.18,colour=NA)+
+  geom_line(linewidth=1)+
+  geom_point(size=2.5)+
+  scale_colour_manual(values=breadth_colours)+
+  scale_fill_manual(values=breadth_colours)+
+  scale_x_log10(breaks=c(10,20,50,100,250,500,1000),labels=scales::label_comma())+
+  scale_y_continuous(limits=c(0,100),breaks=seq(0,100,20),labels=function(x) paste0(x,"%"))+
+  labs(x="Coverage threshold (×)",y="Target bases covered",colour="",fill="")+
+  theme_classic(base_size=14)+
+  theme(legend.position="bottom")
+
+figure_3
+ggsave(file.path(figure_path,"Figure3_coverage_breadth.pdf"),plot=figure_3,width=7,height=5)
+
+ggsave(file.path(figure_path,"Figure3_coverage_breadth.png"),plot=figure_3,width=7,height=5,dpi=600)
+```
+
+# 4 Independent duplex-molecule yield
+
+## 4.1 Load and prepare data
+
+```{r load-molecule-counts}
+molecule_file<-file.path(path,"independent_duplex_molecules.tsv")
+
+molecule_data<-read.delim(molecule_file,sep="\t",header=TRUE,colClasses="character")
+
+molecule_data<-molecule_data %>%
+  filter(patient!="1452") %>%
+  mutate(
+    independent_duplex_molecules=
+      as.numeric(independent_duplex_molecules),
+    molecules_thousands=
+      independent_duplex_molecules/1000,
+    sample_group="Patient samples")
+
+dim(molecule_data)
+
+molecule_data %>%
+  count(sample_group)
+```
+
+## 4.2 Molecule-yield summary
+
+```{r summarise-molecule-yield}
+molecule_summary<-molecule_data %>%
+  summarise(
+    samples=n(),
+    median=median(molecules_thousands,na.rm=TRUE),
+    Q1=quantile(molecules_thousands,0.25,na.rm=TRUE),
+    Q3=quantile(molecules_thousands,0.75,na.rm=TRUE),
+    minimum=min(molecules_thousands,na.rm=TRUE),
+    maximum=max(
+      molecules_thousands,
+      na.rm=TRUE))
+
+molecule_summary
+```
+
+## 4.3 Molecule-yield plot
+
+```{r plot-molecule-yield}
+figure_molecules<-ggplot(molecule_data,aes(x=sample_group,y=molecules_thousands))+
+  geom_boxplot(width=0.4,outlier.shape=NA,fill="darkcyan",alpha=0.7)+
+  geom_jitter(width=0.08,size=2,alpha=0.7)+
+  scale_y_continuous(labels=scales::label_comma())+
+  labs(x="",y="Mapped duplex-consensus molecules per sample (×10³)")+
+  theme_classic(base_size=14)
+
+figure_molecules
+```
+
+## 4.4 Save molecule-yield plot
+
+```{r save-molecule-yield}
+figure_path<-file.path(path,"figures")
+
+dir.create(figure_path,showWarnings=FALSE)
+
+ggsave(file.path(figure_path,"independent_duplex_molecules.pdf"),plot=figure_molecules,width=5.5,height=5)
+
+ggsave(file.path(figure_path,"independent_duplex_molecules.png"),plot=figure_molecules,width=5.5,height=5,dpi=600)
+```
+
+# 5 Fold-80 coverage uniformity
+
+## 5.1 Prepare data
+
+```{r prepare-fold80}
+uniformity_data<-hsmetrics %>%
+  mutate(
+    fold_80_base_penalty=
+      as.numeric(fold_80_base_penalty),
+    stage=recode(
+      as.character(stage),
+      "Raw"="Raw reads",
+      "Duplex"="Duplex consensus",
+      "Raw reads"="Raw reads",
+      "Duplex consensus"="Duplex consensus"),
+    stage=factor(
+      stage,
+      levels=c(
+        "Raw reads",
+        "Duplex consensus")))
+
+uniformity_data %>%
+  count(stage)
+```
+
+## 5.2 Uniformity summary
+
+```{r summarise-fold80}
+uniformity_summary<-uniformity_data %>%
+  group_by(stage) %>%
+  summarise(
+    samples=sum(!is.na(fold_80_base_penalty)),
+    median=median(fold_80_base_penalty,na.rm=TRUE),
+    Q1=quantile(fold_80_base_penalty,0.25,na.rm=TRUE),
+    Q3=quantile(fold_80_base_penalty,0.75,na.rm=TRUE),
+    minimum=min(fold_80_base_penalty,na.rm=TRUE),
+    maximum=max(fold_80_base_penalty,na.rm=TRUE),
+    .groups="drop")
+
+uniformity_summary
+```
+
+## 5.3 Pair samples
+
+```{r pair-fold80}
+uniformity_paired<-uniformity_data %>%
+  select(sample,stage,fold_80_base_penalty) %>%
+  mutate(stage=recode(as.character(stage),"Raw reads"="raw","Duplex consensus"="duplex")) %>%
+  pivot_wider(names_from=stage,values_from=fold_80_base_penalty)
+
+uniformity_change<-uniformity_paired %>%
+  summarise(
+    samples=n(),
+    improved=sum(duplex<raw,na.rm=TRUE),
+    unchanged=sum(duplex==raw,na.rm=TRUE),
+    worsened=sum(
+      duplex>raw,
+      na.rm=TRUE))
+
+uniformity_change
+```
+
+## 5.4 Fold-80 plot
+
+```{r plot-fold80}
+figure_uniformity<-ggplot(uniformity_paired,aes(x=raw,y=duplex))+
+  geom_abline(slope=1,intercept=0,linetype="dashed",colour="grey50")+
+  geom_point(colour="darkcyan",size=2.5,alpha=0.7)+
+  coord_equal(xlim=c(1,1.6),ylim=c(1,1.6))+
+  labs(x="Raw-read Fold-80 base penalty",y="Duplex-consensus Fold-80 base penalty")+
+  theme_classic(base_size=14)
+
+figure_uniformity
+```
+
+## 5.5 Save Fold-80 plot
+
+```{r save-fold80}
+ggsave(file.path(figure_path,"fold80_raw_vs_duplex.pdf"),plot=figure_uniformity,width=5.5,height=5)
+
+ggsave(file.path(figure_path,"fold80_raw_vs_duplex.png"),plot=figure_uniformity,width=5.5,height=5,dpi=600)
+```
+
+# 6 Duplex-molecule recovery
+
+## 6.1 Prepare data
+
+```{r prepare-molecule-recovery}
+recovery_data<-molecule_data %>%
+  select(sample,patient,endpoint,independent_duplex_molecules) %>%
+  inner_join(qc_yield %>% select(sample,read_pairs),by="sample") %>%
+  mutate(
+    read_pairs=as.numeric(read_pairs),
+    independent_duplex_molecules=
+      as.numeric(independent_duplex_molecules),
+    read_pairs_million=
+      read_pairs/1000000,
+    molecules_thousands=
+      independent_duplex_molecules/1000,
+    recovery_percent=
+      100*independent_duplex_molecules/read_pairs)
+
+dim(recovery_data)
+
+recovery_data %>%
+  summarise(samples=n(),missing_yield=sum(is.na(read_pairs)),missing_molecules=sum(is.na(independent_duplex_molecules)))
+```
+
+## 6.2 Recovery summary
+
+```{r summarise-molecule-recovery}
+recovery_summary<-recovery_data %>%
+  summarise(
+    samples=n(),
+    median=median(recovery_percent,na.rm=TRUE),
+    Q1=quantile(recovery_percent,0.25,na.rm=TRUE),
+    Q3=quantile(recovery_percent,0.75,na.rm=TRUE),
+    minimum=min(recovery_percent,na.rm=TRUE),
+    maximum=max(
+      recovery_percent,
+      na.rm=TRUE))
+
+recovery_summary
+```
+
+## 6.3 Test sequencing and molecule yield
+
+```{r test-molecule-recovery}
+recovery_correlation<-cor.test(
+  recovery_data$read_pairs_million,
+  recovery_data$molecules_thousands,
+  method="spearman",
+  exact=FALSE)
+
+recovery_correlation_label<-paste0(
+  "No monotonic association: Spearman rho=",
+  sprintf("%.2f",unname(recovery_correlation$estimate)),
+  "; p=",format.pval(recovery_correlation$p.value,digits=3),
+  "; n=",nrow(recovery_data))
+
+recovery_correlation
+```
+
+## 6.4 Recovery plot
+
+```{r plot-molecule-recovery}
+figure_recovery<-ggplot(recovery_data,aes(x=read_pairs_million,y=molecules_thousands))+
+  geom_point(shape=21,fill=unname(unified_colours["Patient samples"]),colour="black",size=2.2,stroke=0.35,alpha=0.8)+
+  labs(
+    x="Original sequencing yield (million read pairs)",
+    y="Mapped duplex-consensus molecules (×10³)",
+    subtitle=recovery_correlation_label)+
+  theme_classic(base_size=14)
+
+figure_recovery
+```
+
+## 6.5 Save recovery plot
+
+```{r save-molecule-recovery}
+ggsave(file.path(figure_path,"duplex_recovery_vs_sequencing_yield.pdf"),plot=figure_recovery,width=5.5,height=5)
+
+ggsave(file.path(figure_path,"duplex_recovery_vs_sequencing_yield.png"),plot=figure_recovery,width=5.5,height=5,dpi=600)
+```
+
+## 6.6 Duplex family-size distribution
+
+```{r duplex-family-size}
+  family_size_file<-file.path(path,"duplex_family_sizes.tsv")
+
+  patient_family_sizes<-read_tsv(family_size_file,show_col_types=FALSE) %>%
+    mutate(
+      patient=as.character(patient),
+      endpoint=toupper(as.character(endpoint)),
+      ab_size=as.numeric(ab_size),
+      ba_size=as.numeric(ba_size),
+      count=as.numeric(count)) %>%
+    filter(patient!="1452",endpoint%in%c("BL","END"))
+
+  family_size_valid<-patient_family_sizes %>%
+    filter(is.finite(ab_size),is.finite(ba_size),is.finite(count),ab_size>=1,ba_size>=0,count>0)
+
+  #Calculate family-support thresholds
+  family_support_by_sample<-family_size_valid %>%
+    group_by(sample,patient,endpoint) %>%
+    summarise(
+      total_families=sum(count),
+      ba_gt0_families=sum(count[ba_size>0]),
+      ge2_families=sum(count[ab_size>=2 & ba_size>=2]),
+      ge3_families=sum(count[ab_size>=3 & ba_size>=3]),
+      ge5_families=sum(count[ab_size>=5 & ba_size>=5]),
+      .groups="drop")
+
+  family_threshold_reference<-tribble(
+    ~metric,            ~threshold,                 ~definition,             ~threshold_order,
+    "ba_gt0_families", "BA > 0 (duplex yield)",   "AB >=1 and BA >=1",                  1,
+    "ge2_families",    ">=2+2",                   "AB >=2 and BA >=2",                  2,
+    "ge3_families",    ">=3+3",                   "AB >=3 and BA >=3",                  3,
+    "ge5_families",    ">=5+5",                   "AB >=5 and BA >=5",                  4)
+
+  family_support_long<-family_support_by_sample %>%
+    select(sample,total_families,ba_gt0_families,ge2_families,ge3_families,ge5_families) %>%
+    pivot_longer(
+      cols=c(ba_gt0_families,ge2_families,ge3_families,ge5_families),
+      names_to="metric",
+      values_to="families") %>%
+    left_join(family_support_by_sample %>% select(sample,ba_gt0_families),by="sample") %>%
+    mutate(sample_percent=100*families/total_families)
+
+  family_support_summary<-family_support_long %>%
+    group_by(metric) %>%
+    summarise(
+      samples=n_distinct(sample),
+      families=sum(families),
+      total_families=sum(total_families),
+      pooled_percent=100*families/total_families,
+      median_percent=median(sample_percent),
+      Q1=quantile(sample_percent,0.25),
+      Q3=quantile(sample_percent,0.75),
+      minimum=min(sample_percent),
+      maximum=max(sample_percent),
+      among_duplex_percent=100*families/sum(ba_gt0_families),
+      .groups="drop") %>%
+    left_join(family_threshold_reference,by="metric") %>%
+    arrange(threshold_order)
+
+  family_support_medians<-setNames(family_support_summary$median_percent,family_support_summary$metric)
+
+  #Check the duplex-yield calculation
+  duplex_yield_validation<-read_tsv(file.path(path,"duplex_yield_100pct.tsv"),show_col_types=FALSE) %>%
+    transmute(
+      sample=as.character(sample),
+      patient=as.character(patient),
+      reported_duplex_yield_percent=
+        100*as.numeric(ds_fraction_duplexes)) %>%
+    filter(patient!="1452") %>%
+    inner_join(
+      family_support_by_sample %>%
+        transmute(sample,calculated_duplex_yield_percent= 100*ba_gt0_families/total_families),
+      by="sample") %>%
+    mutate(absolute_difference=abs(calculated_duplex_yield_percent- reported_duplex_yield_percent))
+
+  stopifnot(
+    nrow(duplex_yield_validation)==
+      nrow(family_support_by_sample),
+    max(duplex_yield_validation$absolute_difference)<0.001)
+
+  duplex_yield_summary<-duplex_yield_validation %>%
+    summarise(
+      samples=n(),
+      median=median(reported_duplex_yield_percent),
+      Q1=quantile(reported_duplex_yield_percent,0.25),
+      Q3=quantile(reported_duplex_yield_percent,0.75),
+      minimum=min(reported_duplex_yield_percent),
+      maximum=max(reported_duplex_yield_percent),
+      maximum_validation_difference=max(absolute_difference))
+
+  family_support_table<-family_support_summary %>%
+    transmute(
+      threshold,
+      definition,
+      pooled_families=paste0(label_comma()(families)," / ",label_comma()(total_families)),
+      pooled_percent,
+      median_IQR=paste0(sprintf("%.1f",median_percent)," (",sprintf("%.1f",Q1),"-",sprintf("%.1f",Q3),")"),
+      among_duplex_percent)
+
+  family_support_gt<-family_support_table %>%
+    gt() %>%
+    cols_label(
+      threshold="Family support threshold",
+      definition="Definition",
+      pooled_families="Pooled families, n/N",
+      pooled_percent="Pooled families",
+      median_IQR="Median per sample (IQR), %",
+      among_duplex_percent="Among duplex families") %>%
+    fmt_number(columns=c(pooled_percent,among_duplex_percent),decimals=1,suffix="%") %>%
+    cols_align("left",columns=c(threshold,definition)) %>%
+    cols_align("center",columns=-c(threshold,definition)) %>%
+    tab_header(
+      title=md("**UMI-family support and observed duplex yield**"),
+      subtitle=paste0(
+        nrow(family_support_by_sample),
+        " patient samples; thresholds calculated from unbinned family counts")) %>%
+    tab_style(style=cell_text(weight="bold"),locations=cells_column_labels()) %>%
+    tab_source_note(md(paste0(
+      "*BA > 0 is the observed duplex yield: ds_duplexes / ds_families. ",
+      "It matched the fgbio value in every sample (maximum absolute difference ",
+      sprintf("%.4f",duplex_yield_summary$maximum_validation_difference),
+      " percentage points).*"))) %>%
+    tab_source_note(md(
+      "*Pooled percentages weight samples by their number of UMI families; the median and IQR give every sample equal weight.*")) %>%
+    tab_options(
+      table.font.names="Arial",
+      table.font.size=11,
+      heading.title.font.size=11,
+      heading.subtitle.font.size=10,
+      heading.align="left",
+      data_row.padding=2,
+      column_labels.padding=4,
+      source_notes.font.size=9,
+      row.striping.background_color="white")
+
+  family_size_limit<-10
+
+  family_size_sample<-family_size_valid %>%
+    mutate(ab_plot=pmin(ab_size,family_size_limit),ba_plot=pmin(ba_size,family_size_limit)) %>%
+    group_by(sample,ab_plot,ba_plot) %>%
+    summarise(families=sum(count),.groups="drop") %>%
+    complete(sample,ab_plot=1:family_size_limit,ba_plot=0:family_size_limit,fill=list(families=0)) %>%
+    filter(ba_plot<=ab_plot) %>%
+    group_by(sample) %>%
+    mutate(total_families=sum(families),family_percent=100*families/total_families) %>%
+    ungroup()
+
+  family_size_summary<-family_size_sample %>%
+    group_by(ab_plot,ba_plot) %>%
+    summarise(
+      samples=n_distinct(sample),
+      median_percent=median(family_percent,na.rm=TRUE),
+      Q1=quantile(family_percent,0.25,na.rm=TRUE),
+      Q3=quantile(family_percent,0.75,na.rm=TRUE),
+      .groups="drop")
+
+  duplex_family_size_levels<-c("1+1","2+2","3+3","4+4",">=5+5")
+
+  duplex_family_size_counts<-family_size_valid %>%
+    filter(ba_size>0) %>%
+    mutate(
+      family_size_category=case_when(
+        ba_size==1 ~ "1+1",
+        ba_size==2 ~ "2+2",
+        ba_size==3 ~ "3+3",
+        ba_size==4 ~ "4+4",
+        ba_size>=5 ~ ">=5+5")) %>%
+    group_by(sample,family_size_category) %>%
+    summarise(families=sum(count),.groups="drop")
+
+  duplex_family_totals<-family_size_valid %>%
+    filter(ba_size>0) %>%
+    group_by(sample) %>%
+    summarise(duplex_families=sum(count),.groups="drop")
+
+  duplex_family_size_by_sample<-expand_grid(
+      sample=duplex_family_totals$sample,
+      family_size_category=duplex_family_size_levels) %>%
+    left_join(duplex_family_size_counts,by=c("sample","family_size_category")) %>%
+    left_join(duplex_family_totals,by="sample") %>%
+    mutate(
+      families=replace_na(families,0),
+      family_percent=100*families/duplex_families,
+      family_size_category=factor(
+        family_size_category,
+        levels=duplex_family_size_levels))
+
+  duplex_family_size_check<-duplex_family_size_by_sample %>%
+    group_by(sample) %>%
+    summarise(total_percent=sum(family_percent),.groups="drop")
+
+  stopifnot(all(abs(duplex_family_size_check$total_percent-100)<1e-8))
+
+  duplex_family_size_summary<-duplex_family_size_by_sample %>%
+    group_by(family_size_category) %>%
+    summarise(
+      samples=n_distinct(sample),
+      median_percent=median(family_percent,na.rm=TRUE),
+      Q1=quantile(family_percent,0.25,na.rm=TRUE),
+      Q3=quantile(family_percent,0.75,na.rm=TRUE),
+      .groups="drop")
+
+  figure_duplex_family_size<-ggplot(duplex_family_size_summary,aes(x=family_size_category,y=median_percent))+
+    geom_col(width=0.68,fill=unname(unified_colours["Patient samples"]),colour="black",linewidth=0.35,alpha=0.80)+
+    geom_errorbar(aes(ymin=Q1,ymax=Q3),width=0.16,linewidth=0.5)+
+    geom_text(aes(y=Q3,label=paste0(sprintf("%.1f",median_percent),"%")),vjust=-0.45,size=3.2)+
+    scale_y_continuous(labels=label_percent(scale=1),expand=expansion(mult=c(0,0.14)))+
+    labs(
+      x="Minimum reads in each strand family",
+      y="Duplex families per sample (%)",
+      subtitle="Bars show medians; whiskers show the interquartile range",
+      caption=paste0(
+        "Categories use BA, the smaller strand family; ",
+        "the larger AB family may contain additional reads."))+
+    theme_unified()+
+    theme(
+      panel.grid=element_blank(),
+      plot.subtitle=element_text(size=9),
+      plot.caption=element_text(size=8,hjust=0,margin=margin(t=5)))
+
+  figure_duplex_family_size
+  family_support_gt
+```
+
+# 7 Duplex fraction and sequencing saturation
+
+## 7.1 Load full-depth duplex data
+
+```{r load-duplex-fractions}
+duplex_file<-file.path(path,"duplex_yield_100pct.tsv")
+
+if(!file.exists(duplex_file)){
+  stop("Missing file: duplex_yield_100pct.tsv")
+}
+
+duplex_data<-read.delim(duplex_file,sep="\t",header=TRUE,colClasses="character")
+
+duplex_data<-duplex_data %>%
+  filter(patient!="1452") %>%
+  mutate(
+    read_pairs=as.numeric(read_pairs),
+    ds_families=as.numeric(ds_families),
+    ds_duplexes=as.numeric(ds_duplexes),
+    ds_fraction_duplexes=
+      as.numeric(ds_fraction_duplexes),
+    ds_fraction_duplexes_ideal=
+      as.numeric(ds_fraction_duplexes_ideal))
+
+dim(duplex_data)
+```
+
+## 7.2 Validate duplex fractions
+
+```{r validate-duplex-fractions}
+range(duplex_data$ds_fraction_duplexes,na.rm=TRUE)
+
+range(duplex_data$ds_fraction_duplexes_ideal,na.rm=TRUE)
+
+if(any(
+  duplex_data$ds_fraction_duplexes<0 |
+  duplex_data$ds_fraction_duplexes>1,
+  na.rm=TRUE)){
+  stop("ds_fraction_duplexes is not a proportion between 0 and 1")
+}
+
+if(any(
+  duplex_data$ds_fraction_duplexes_ideal<0 |
+  duplex_data$ds_fraction_duplexes_ideal>1,
+  na.rm=TRUE)){
+  stop("ds_fraction_duplexes_ideal is not a proportion between 0 and 1")
+}
+```
+
+```{r convert-duplex-percent}
+duplex_data<-duplex_data %>%
+  mutate(
+    duplex_fraction=
+      100*ds_fraction_duplexes,
+    ideal_duplex_fraction=
+      100*ds_fraction_duplexes_ideal,
+    duplex_fraction_gap=
+      ideal_duplex_fraction-duplex_fraction)
+```
+
+## 7.3 Full-depth duplex summary
+
+```{r summarise-duplex-fractions}
+duplex_summary<-duplex_data %>%
+  summarise(
+    samples=n(),
+    observed_median=median(duplex_fraction,na.rm=TRUE),
+    observed_Q1=quantile(duplex_fraction,0.25,na.rm=TRUE),
+    observed_Q3=quantile(duplex_fraction,0.75,na.rm=TRUE),
+    observed_minimum=min(duplex_fraction,na.rm=TRUE),
+    observed_maximum=max(duplex_fraction,na.rm=TRUE),
+    ideal_median=median(ideal_duplex_fraction,na.rm=TRUE),
+    ideal_Q1=quantile(ideal_duplex_fraction,0.25,na.rm=TRUE),
+    ideal_Q3=quantile(ideal_duplex_fraction,0.75,na.rm=TRUE),
+    median_gap=median(
+      duplex_fraction_gap,
+      na.rm=TRUE))
+
+duplex_summary
+```
+
+## 7.4 Observed and ideal duplex fractions
+
+```{r plot-duplex-fractions}
+figure_duplex_paired<-ggplot(duplex_data,aes(x=duplex_fraction,y=ideal_duplex_fraction))+
+  geom_abline(slope=1,intercept=0,linetype="dashed",colour="grey50")+
+  geom_point(colour="darkcyan",size=2.5,alpha=0.7)+
+  coord_equal(xlim=c(50,100),ylim=c(50,100))+
+  labs(x="Observed duplex fraction (%)",y="Ideal duplex fraction (%)")+
+  theme_classic(base_size=14)
+
+figure_duplex_paired
+```
+
+## 7.5 Save duplex-fraction plot
+
+```{r save-duplex-fractions}
+ggsave(file.path(figure_path,"observed_vs_ideal_duplex_fraction.pdf"),plot=figure_duplex_paired,width=5.5,height=5)
+
+ggsave(
+  file.path(figure_path,"observed_vs_ideal_duplex_fraction.png"),
+  plot=figure_duplex_paired,
+  width=5.5,
+  height=5,
+  dpi=600)
+```
+
+## 7.6 Load saturation data
+
+```{r load-saturation-data}
+saturation_file<-file.path(path,"duplex_yield_all_fractions.tsv")
+
+if(!file.exists(saturation_file)){
+  stop("Missing file: duplex_yield_all_fractions.tsv")
+}
+
+saturation_data<-read.delim(saturation_file,sep="\t",header=TRUE,colClasses="character")
+
+saturation_data<-saturation_data %>%
+  filter(patient!="1452") %>%
+  mutate(
+    fraction=as.numeric(fraction),
+    read_pairs=as.numeric(read_pairs),
+    ds_families=as.numeric(ds_families),
+    ds_duplexes=as.numeric(ds_duplexes),
+    ds_fraction_duplexes=
+      as.numeric(ds_fraction_duplexes),
+    ds_fraction_duplexes_ideal=
+      as.numeric(ds_fraction_duplexes_ideal))
+
+dim(saturation_data)
+```
+
+## 7.7 Validate saturation proportions
+
+```{r validate-saturation-proportions}
+range(saturation_data$fraction,na.rm=TRUE)
+
+range(saturation_data$ds_fraction_duplexes,na.rm=TRUE)
+
+range(saturation_data$ds_fraction_duplexes_ideal,na.rm=TRUE)
+
+saturation_values<-c(
+  saturation_data$fraction,
+  saturation_data$ds_fraction_duplexes,
+  saturation_data$ds_fraction_duplexes_ideal)
+
+if(any(
+  saturation_values<0 |
+  saturation_values>1,
+  na.rm=TRUE)){
+  stop("One or more saturation variables are not proportions between 0 and 1")
+}
+```
+
+```{r convert-saturation-percent}
+saturation_data<-saturation_data %>%
+  mutate(
+    sequencing_fraction=
+      100*fraction,
+    observed_duplex_fraction=
+      100*ds_fraction_duplexes,
+    ideal_duplex_fraction=
+      100*ds_fraction_duplexes_ideal)
+```
+
+```{r check-saturation-samples}
+saturation_data %>%
+  count(sequencing_fraction)
+```
+
+## 7.8 Saturation summary
+
+```{r summarise-saturation}
+saturation_summary<-saturation_data %>%
+  group_by(sequencing_fraction) %>%
+  summarise(
+    samples=n(),
+    observed_median=median(observed_duplex_fraction,na.rm=TRUE),
+    observed_Q1=quantile(observed_duplex_fraction,0.25,na.rm=TRUE),
+    observed_Q3=quantile(observed_duplex_fraction,0.75,na.rm=TRUE),
+    ideal_median=median(ideal_duplex_fraction,na.rm=TRUE),
+    ideal_Q1=quantile(ideal_duplex_fraction,0.25,na.rm=TRUE),
+    ideal_Q3=quantile(ideal_duplex_fraction,0.75,na.rm=TRUE),
+    .groups="drop")
+
+saturation_summary
+```
+
+## 7.9 Saturation curve
+
+```{r plot-saturation}
+figure_saturation<-ggplot(saturation_summary,aes(x=sequencing_fraction))+
+  geom_ribbon(aes(ymin=observed_Q1,ymax=observed_Q3),fill="darkcyan",alpha=0.18)+
+  geom_ribbon(aes(ymin=ideal_Q1,ymax=ideal_Q3),fill="grey60",alpha=0.12)+
+  geom_line(aes(y=observed_median,colour="Observed duplex fraction"),linewidth=1)+
+  geom_line(aes(y=ideal_median,colour="Ideal duplex fraction"),linewidth=1,linetype="dashed")+
+  scale_colour_manual(values=c("Observed duplex fraction"="darkcyan","Ideal duplex fraction"="grey35"))+
+  scale_x_continuous(breaks=seq(0,100,20),limits=c(0,100))+
+  scale_y_continuous(breaks=seq(0,100,20),limits=c(0,100),labels=scales::label_percent(scale=1))+
+  labs(x="Sequencing data used (%)",y="Duplex fraction",colour="")+
+  theme_classic(base_size=14)+
+  theme(legend.position="bottom")
+
+figure_saturation
+```
+
+## 7.10 Save saturation curve
+
+```{r save-saturation}
+ggsave(file.path(figure_path,"duplex_saturation_curve.pdf"),plot=figure_saturation,width=6.5,height=5)
+
+ggsave(file.path(figure_path,"duplex_saturation_curve.png"),plot=figure_saturation,width=6.5,height=5,dpi=600)
+```
+
+# 8 HsMetrics technical summary
+
+## 8.1 Load data
+
+```{r load-full-hsmetrics}
+full_hsmetrics_file<-file.path(path,"full_hsmetrics.tsv")
+
+file.exists(full_hsmetrics_file)
+
+full_hsmetrics<-read.delim(full_hsmetrics_file,sep="\t",header=TRUE,colClasses="character",check.names=FALSE)
+
+dim(full_hsmetrics)
+
+full_hsmetrics %>%
+  count(endpoint)
+```
+
+## 8.2 Prepare variables
+
+```{r prepare-full-hsmetrics}
+full_hsmetrics<-full_hsmetrics %>%
+  filter(patient!="1452") %>%
+  mutate(
+    sample_group=if_else(endpoint=="HC","Healthy controls","Patient samples"),
+    mean_target_coverage=
+      as.numeric(MEAN_TARGET_COVERAGE),
+    median_target_coverage=
+      as.numeric(MEDIAN_TARGET_COVERAGE),
+    selected_bases_percent=
+      100*as.numeric(PCT_SELECTED_BASES),
+    usable_bases_on_target_percent=
+      100*as.numeric(PCT_USABLE_BASES_ON_TARGET),
+    fold_80_base_penalty=
+      as.numeric(FOLD_80_BASE_PENALTY),
+    zero_coverage_targets_percent=
+      100*as.numeric(ZERO_CVG_TARGETS_PCT),
+    target_bases_1000x_percent=
+      100*as.numeric(PCT_TARGET_BASES_1000X),
+    target_bases_2500x_percent=
+      100*as.numeric(PCT_TARGET_BASES_2500X),
+    target_bases_5000x_percent=
+      100*as.numeric(PCT_TARGET_BASES_5000X))
+
+full_hsmetrics %>%
+  count(sample_group)
+```
+
+## 8.3 HsMetrics summary
+
+```{r summarise-full-hsmetrics}
+full_hsmetrics_summary<-full_hsmetrics %>%
+  group_by(sample_group) %>%
+  summarise(
+    samples=n(),
+    median_mean_coverage=median(mean_target_coverage,na.rm=TRUE),
+    median_selected_bases_percent=median(selected_bases_percent,na.rm=TRUE),
+    median_usable_on_target_percent=median(usable_bases_on_target_percent,na.rm=TRUE),
+    median_fold_80=median(fold_80_base_penalty,na.rm=TRUE),
+    median_zero_coverage_targets_percent=median(zero_coverage_targets_percent,na.rm=TRUE),
+    median_target_bases_1000x_percent=median(target_bases_1000x_percent,na.rm=TRUE),
+    median_target_bases_2500x_percent=median(target_bases_2500x_percent,na.rm=TRUE),
+    median_target_bases_5000x_percent=median(target_bases_5000x_percent,na.rm=TRUE),
+    .groups="drop")
+
+full_hsmetrics_summary_display<-full_hsmetrics_summary %>%
+  mutate(across(where(is.numeric),~round(.x,2)))
+
+full_hsmetrics_summary_display
+```
+
+```{r format-hsmetrics-table}
+hsmetrics_table<-full_hsmetrics_summary_display %>%
+  transmute(
+    Group=sample_group,
+    N=samples,
+    `Mean depth (×)`=median_mean_coverage,
+    `Selected bases (%)`=median_selected_bases_percent,
+    `Usable on-target (%)`=median_usable_on_target_percent,
+    `Fold-80`=median_fold_80,
+    `Zero coverage (%)`=median_zero_coverage_targets_percent,
+    `≥1000× (%)`=median_target_bases_1000x_percent,
+    `≥2500× (%)`=median_target_bases_2500x_percent,
+    `≥5000× (%)`=median_target_bases_5000x_percent)
+
+hsmetrics_gt<-hsmetrics_table %>%
+  gt() %>%
+  tab_header(title="Picard HsMetrics summary for final duplex-consensus BAMs") %>%
+  tab_options(table.font.size=px(11))
+
+hsmetrics_gt
+```
+
+# 9 Per-target and per-gene coverage
+
+## 9.1 Load per-target coverage
+
+```{r load-per-target-coverage}
+per_target_file<-file.path(path,"per_target_coverage.tsv")
+
+file.exists(per_target_file)
+
+per_target<-read.delim(per_target_file,sep="\t",header=TRUE,colClasses="character",check.names=FALSE)
+
+dim(per_target)
+
+names(per_target)
+```
+
+```{r check-target-counts}
+per_target %>%
+  count(sample) %>%
+  count(n)
+```
+
+## 9.2 Prepare target data
+
+```{r prepare-target-coverage}
+target_data<-per_target %>%
+  filter(patient!="1452") %>%
+  mutate(
+    sample_group=if_else(endpoint=="HC","Healthy controls","Patient samples"),
+    length=as.numeric(length),
+    mean_coverage=as.numeric(mean_coverage),
+    min_coverage=as.numeric(min_coverage),
+    max_coverage=as.numeric(max_coverage))
+
+target_data %>%
+  count(sample_group)
+```
+
+## 9.3 Calculate gene-level coverage
+
+```{r calculate-gene-coverage}
+gene_coverage<-target_data %>%
+  group_by(sample,patient,endpoint,sample_group,name) %>%
+  summarise(
+    target_intervals=n(),
+    target_bases=sum(length,na.rm=TRUE),
+    mean_gene_coverage=weighted.mean(mean_coverage,w=length,na.rm=TRUE),
+    minimum_base_coverage=min(min_coverage,na.rm=TRUE),
+    .groups="drop") %>%
+  rename(gene=name)
+
+gene_coverage %>%
+  count(sample) %>%
+  count(n)
+```
+
+## 9.4 Gene-coverage summary
+
+```{r summarise-gene-coverage}
+gene_coverage_summary<-gene_coverage %>%
+  group_by(sample_group,gene) %>%
+  summarise(
+    samples=n(),
+    median=median(mean_gene_coverage,na.rm=TRUE),
+    Q1=quantile(mean_gene_coverage,0.25,na.rm=TRUE),
+    Q3=quantile(mean_gene_coverage,0.75,na.rm=TRUE),
+    minimum=min(mean_gene_coverage,na.rm=TRUE),
+    maximum=max(mean_gene_coverage,na.rm=TRUE),
+    .groups="drop")
+
+gene_coverage_summary
+```
+
+## 9.5 Gene-coverage plot
+
+```{r plot-gene-coverage}
+gene_coverage<-gene_coverage %>% mutate(gene=factor(gene,levels=c("BAP1","SF3B1","EIF1AX","MBD4","GNAQ","GNA11","PLCB4","CYSLTR2")))
+
+gene_colours<-c(
+  "Healthy controls"=unname(unified_colours["Healthy controls"]),
+  "Patient samples"=unname(unified_colours["Patient samples"]))
+
+figure_gene_coverage<-ggplot(gene_coverage,aes(x=gene,y=mean_gene_coverage,fill=sample_group,colour=sample_group))+
+  geom_boxplot(position=position_dodge(width=0.75),width=0.6,outlier.shape=NA,alpha=0.6)+
+  geom_point(position=position_jitterdodge(jitter.width=0.08,dodge.width=0.75),size=1.5,alpha=0.6)+
+  scale_fill_manual(values=gene_colours)+
+  scale_colour_manual(values=gene_colours)+
+  scale_y_continuous(labels=scales::label_comma())+
+  labs(x="Targeted gene",y="Mean duplex-consensus coverage (×)") +
+theme_unified() +
+theme(axis.text.x=element_text(angle=45,hjust=1),legend.position="bottom")
+
+figure_gene_coverage <- standardize_plot(figure_gene_coverage)
+figure_gene_coverage$layers[[2]]$aes_params$colour <- "black"
+figure_gene_coverage
+```
+
+# 10 Base-level panel coverage
+
+## 10.1 Load coverage summaries
+
+```{r load-base-coverage}
+base_sample_file<-file.path(path,"base_depth_sample_summary.tsv")
+base_gene_file<-file.path(path,"base_depth_gene_summary.tsv")
+
+file.exists(base_sample_file)
+file.exists(base_gene_file)
+
+base_sample<-read.delim(base_sample_file,sep="\t",header=TRUE,check.names=FALSE)
+base_gene<-read.delim(base_gene_file,sep="\t",header=TRUE,check.names=FALSE)
+
+dim(base_sample)
+dim(base_gene)
+
+names(base_sample)
+names(base_gene)
+```
+
+```{r prepare-base-coverage}
+base_sample<-base_sample %>%
+  mutate(sample_group=if_else(endpoint=="HC","Healthy controls","Patient samples"))
+
+base_gene<-base_gene %>%
+  mutate(sample_group=if_else(endpoint=="HC","Healthy controls","Patient samples"))
+
+base_sample %>% count(sample_group)
+base_gene %>% count(sample_group)
+```
+
+## 10.2 Base-coverage summary by sample
+
+```{r summarise-base-coverage}
+base_depth_summary<-base_sample %>%
+  group_by(sample_group) %>%
+  summarise(
+    samples=n(),
+    median_mean_depth=median(mean_depth,na.rm=TRUE),
+    median_minimum_depth=median(minimum_depth,na.rm=TRUE),
+    median_zero_percent=median(zero_percent,na.rm=TRUE),
+    median_250x=median(pct_250x,na.rm=TRUE),
+    median_500x=median(pct_500x,na.rm=TRUE),
+    median_1000x=median(pct_1000x,na.rm=TRUE),
+    median_2000x=median(pct_2000x,na.rm=TRUE),
+    median_3000x=median(pct_3000x,na.rm=TRUE),
+    .groups="drop")
+
+base_depth_summary
+```
+
+## 10.3 Prepare coverage thresholds
+
+```{r prepare-coverage-thresholds}
+base_threshold_data<-base_sample %>%
+  select(sample,sample_group,pct_250x,pct_500x,pct_1000x,pct_2000x,pct_3000x) %>%
+  pivot_longer(cols=starts_with("pct_"),names_to="threshold",values_to="percent_covered") %>%
+  mutate(
+    threshold=recode(
+      threshold,
+      "pct_250x"="250×",
+      "pct_500x"="500×",
+      "pct_1000x"="1,000×",
+      "pct_2000x"="2,000×",
+      "pct_3000x"="3,000×"),
+    threshold=factor(threshold,levels=c("250×","500×","1,000×","2,000×","3,000×")))
+
+base_threshold_data %>% count(sample_group,threshold)
+```
+
+```{r summarise-coverage-thresholds}
+base_threshold_summary<-base_threshold_data %>%
+  group_by(sample_group,threshold) %>%
+  summarise(
+    samples=n(),
+    median=median(percent_covered,na.rm=TRUE),
+    Q1=quantile(percent_covered,0.25,na.rm=TRUE),
+    Q3=quantile(percent_covered,0.75,na.rm=TRUE),
+    .groups="drop")
+
+base_threshold_summary
+```
+
+## 10.4 Plot coverage thresholds
+
+```{r plot-coverage-thresholds}
+group_colours<-c(
+  "Healthy controls"=unname(unified_colours["Healthy controls"]),
+  "Patient samples"=unname(unified_colours["Patient samples"]))
+
+figure_base_depth<-ggplot(
+  base_threshold_summary,
+  aes(x=threshold,y=median,colour=sample_group,fill=sample_group,group=sample_group))+
+  geom_ribbon(aes(ymin=Q1,ymax=Q3),colour=NA,alpha=0.15)+
+  geom_line(linewidth=0.8)+
+  geom_point(size=2)+
+  scale_colour_manual(values=group_colours)+
+  scale_fill_manual(values=group_colours)+
+  scale_y_continuous(limits=c(0,100),breaks=seq(0,100,20),labels=scales::label_percent(scale=1))+
+  labs(x="Coverage threshold",y="Target bases covered",colour="",fill="")+
+  theme_unified()+
+  theme(legend.position="bottom")
+
+figure_base_depth
+```
+
+## 10.5 Target-interval coverage
+
+### 10.5.1 Prepare interval data
+
+```{r prepare-interval-data}
+per_target_file<-file.path(path,"per_target_coverage.tsv")
+
+per_target<-read.delim(per_target_file,sep="\t",header=TRUE,check.names=FALSE) %>%
+  filter(patient!="1452") %>%
+  mutate(
+    start=as.numeric(start),
+    end=as.numeric(end),
+    mean_coverage=as.numeric(mean_coverage),
+    endpoint=recode(endpoint,"BL"="Baseline","END"="Post-radiotherapy","HC"="Healthy controls"),
+    endpoint=factor(
+      endpoint,
+      levels=c(
+        "Baseline",
+        "Post-radiotherapy",
+        "Healthy controls")))
+
+n_distinct(per_target$sample)
+n_distinct(paste(per_target$chrom,per_target$start,per_target$end))
+```
+
+### 10.5.2 Create interval labels
+
+```{r create-interval-labels}
+target_key<-per_target %>%
+  distinct(chrom,start,end,name) %>%
+  arrange(name,chrom,start,end) %>%
+  group_by(name) %>%
+  mutate(interval_number=row_number(),interval=paste0(name,"_",interval_number)) %>%
+  ungroup()
+
+interval_data<-per_target %>%
+  left_join(target_key,by=c("chrom","start","end","name"))
+
+sample_order<-interval_data %>%
+  distinct(sample,patient,endpoint) %>%
+  mutate(patient_number=as.numeric(patient)) %>%
+  arrange(endpoint,patient_number,sample) %>%
+  pull(sample)
+
+interval_order<-target_key %>%
+  arrange(name,chrom,start,end) %>%
+  pull(interval)
+
+interval_data<-interval_data %>%
+  mutate(sample=factor(sample,levels=sample_order),interval=factor(interval,levels=rev(interval_order)))
+```
+
+### 10.5.3 Interval coverage heatmap
+
+```{r interval-level-coverage-heatmap, fig.width=12, fig.height=11.5, dpi=150}
+patient_interval_heatmap_data<-interval_data %>%
+  filter(endpoint%in%c("Baseline","Post-radiotherapy"))
+
+figure_interval_heatmap<-ggplot(patient_interval_heatmap_data,aes(x=sample,y=interval,fill=mean_coverage))+
+  geom_tile()+
+  facet_grid(
+    name~endpoint,
+    scales="free",
+    space="free_y",
+    switch="y",
+    labeller=labeller(
+      endpoint=as_labeller(
+        c(
+          "Baseline"="Baseline",
+          "Post-radiotherapy"="Post-radiotherapy"))))+
+  scale_fill_viridis_c(trans=scales::pseudo_log_trans(sigma=1),labels=scales::label_comma(),name="Mean coverage\n(x)")+
+  scale_y_discrete(labels=function(x) sub("^.*_", "", x))+
+  labs(x="Samples",y="Capture interval")+
+  theme_classic(base_size=10)+
+  theme(
+    axis.text.x=element_blank(),
+    axis.ticks.x=element_blank(),
+    axis.text.y=element_text(size=7),
+    axis.title.y=element_text(margin=margin(r=10)),
+    strip.background=element_blank(),
+    strip.placement="outside",
+    strip.text.x=element_text(size=11),
+    strip.text.y.left=element_text(angle=0,face="bold",size=9,margin=margin(r=5)),
+    panel.spacing.x=grid::unit(2,"mm"),
+    panel.spacing.y=grid::unit(1,"mm"),
+    plot.margin=margin(
+      10,
+      20,
+      10,
+      35))
+
+figure_interval_heatmap
+```
+
+### 10.5.4 Save interval heatmap
+
+```{r save-interval-heatmap}
+ggsave(
+  file.path(figure_path,"Supplementary_interval_coverage_heatmap.pdf"),
+  plot=figure_interval_heatmap,
+  width=12,
+  height=11.5)
+
+ggsave(
+  file.path(figure_path,"Supplementary_interval_coverage_heatmap.png"),
+  plot=figure_interval_heatmap,
+  width=12,
+  height=11.5,
+  dpi=600)
+```
+
+### 10.5.5 Interval summary
+
+```{r summarise-intervals}
+interval_summary<-interval_data %>%
+  group_by(name,interval,chrom,start,end) %>%
+  summarise(
+    samples=n(),
+    median_coverage=median(mean_coverage,na.rm=TRUE),
+    minimum_coverage=min(mean_coverage,na.rm=TRUE),
+    maximum_coverage=max(mean_coverage,na.rm=TRUE),
+    .groups="drop")
+
+interval_summary
+```
+
+### 10.5.6 Patient interval summary
+
+```{r summarise-patient-intervals}
+patient_interval_summary<-interval_data %>%
+  filter(endpoint!="Healthy controls") %>%
+  group_by(name,interval,chrom,start,end) %>%
+  summarise(
+    samples=n(),
+    median_coverage=median(mean_coverage,na.rm=TRUE),
+    minimum_coverage=min(mean_coverage,na.rm=TRUE),
+    maximum_coverage=max(mean_coverage,na.rm=TRUE),
+    samples_below_500x=sum(mean_coverage<500,na.rm=TRUE),
+    samples_below_1000x=sum(mean_coverage<1000,na.rm=TRUE),
+    .groups="drop") %>%
+  arrange(median_coverage)
+
+patient_interval_summary
+patient_interval_summary %>%
+  slice_head(n=10)
+patient_interval_check<-patient_interval_summary %>%
+  summarise(
+    intervals=n(),
+    intervals_with_zero_minimum=
+      sum(minimum_coverage==0),
+    intervals_with_minimum_below_500x=
+      sum(minimum_coverage<500),
+    intervals_with_median_below_1000x=
+      sum(median_coverage<1000))
+
+patient_interval_check
+```
+
+# 11 Samples requiring QC review
+
+## 11.1 Combine coverage and molecule data
+
+```{r combine-patient-qc}
+patient_qc<-base_sample %>%
+  filter(endpoint %in% c("BL","END")) %>%
+  left_join(molecule_data %>% select(sample,independent_duplex_molecules),by="sample") %>%
+  mutate(independent_duplex_molecules=as.numeric(independent_duplex_molecules))
+
+patient_qc %>%
+  summarise(samples=n(),missing_molecules=sum(is.na(independent_duplex_molecules)))
+```
+
+## 11.2 Calculate the expected range
+
+```{r calculate-qc-limits}
+qc_limits<-patient_qc %>%
+  summarise(
+    lower_mean_depth=max(0,quantile(mean_depth,0.25,na.rm=TRUE)-1.5*IQR(mean_depth,na.rm=TRUE)),
+    lower_500x=max(0,quantile(pct_500x,0.25,na.rm=TRUE)-1.5*IQR(pct_500x,na.rm=TRUE)),
+    lower_molecules=max(0,quantile(independent_duplex_molecules,0.25,na.rm=TRUE)-1.5*IQR(independent_duplex_molecules,na.rm=TRUE)),
+    upper_zero_percent=quantile(zero_percent,0.75,na.rm=TRUE)+1.5*IQR(zero_percent,na.rm=TRUE))
+
+qc_limits
+```
+
+## 11.3 Flag samples for review
+
+```{r flag-qc-samples}
+patient_qc<-patient_qc %>%
+  mutate(
+    qc_status=if_else(
+      is.na(independent_duplex_molecules) |
+      mean_depth<qc_limits$lower_mean_depth |
+      pct_500x<qc_limits$lower_500x |
+      independent_duplex_molecules<qc_limits$lower_molecules |
+      zero_percent>qc_limits$upper_zero_percent,
+      "Review",
+      "Within cohort range"))
+
+patient_qc %>% count(qc_status)
+```
+
+## 11.4 Display samples for review
+
+```{r display-qc-samples}
+samples_for_review<-patient_qc %>%
+  filter(qc_status=="Review") %>%
+  select(sample,endpoint,mean_depth,independent_duplex_molecules,zero_percent,pct_500x,pct_1000x) %>%
+  arrange(mean_depth)
+
+samples_for_review
+```
+
+# 12 Baseline and post-radiotherapy QC balance
+
+## 12.1 Combine timepoint measurements
+
+```{r combine-timepoint-qc}
+timepoint_qc<-base_sample %>%
+  filter(endpoint %in% c("BL","END")) %>%
+  select(sample,patient,endpoint,mean_depth,pct_1000x) %>%
+  left_join(qc_yield %>% select(sample,read_pairs),by="sample") %>%
+  left_join(molecule_data %>% select(sample,independent_duplex_molecules),by="sample") %>%
+  mutate(
+    read_pairs=as.numeric(read_pairs),
+    independent_duplex_molecules=as.numeric(independent_duplex_molecules),
+    read_pairs_million=read_pairs/1000000,
+    molecules_thousands=independent_duplex_molecules/1000,
+    timepoint=recode(endpoint,"BL"="Baseline","END"="Post-radiotherapy"),
+    timepoint=factor(timepoint,levels=c("Baseline","Post-radiotherapy")))
+
+timepoint_qc %>%
+  summarise(
+    samples=n(),
+    patients=n_distinct(patient),
+    missing_yield=sum(is.na(read_pairs)),
+    missing_molecules=sum(is.na(independent_duplex_molecules)))
+```
+
+## 12.2 Confirm patient pairs
+
+```{r check-timepoint-pairs}
+timepoint_qc %>%
+  count(patient) %>%
+  count(n)
+```
+
+## 12.3 Summarise QC by timepoint
+
+```{r summarise-timepoint-qc}
+timepoint_summary<-timepoint_qc %>%
+  group_by(timepoint) %>%
+  summarise(
+    samples=n(),
+    median_read_pairs_million=median(read_pairs_million,na.rm=TRUE),
+    median_molecules_thousands=median(molecules_thousands,na.rm=TRUE),
+    median_mean_depth=median(mean_depth,na.rm=TRUE),
+    median_1000x_percent=median(pct_1000x,na.rm=TRUE),
+    .groups="drop")
+
+timepoint_summary
+```
+
+## 12.4 Perform paired comparisons
+
+```{r test-timepoint-qc}
+timepoint_wide<-timepoint_qc %>%
+  select(patient,endpoint,read_pairs_million,molecules_thousands,mean_depth,pct_1000x) %>%
+  pivot_wider(names_from=endpoint,values_from=c(read_pairs_million,molecules_thousands,mean_depth,pct_1000x))
+
+yield_test<-wilcox.test(
+  timepoint_wide$read_pairs_million_BL,
+  timepoint_wide$read_pairs_million_END,
+  paired=TRUE,
+  exact=FALSE)
+
+molecule_test<-wilcox.test(
+  timepoint_wide$molecules_thousands_BL,
+  timepoint_wide$molecules_thousands_END,
+  paired=TRUE,
+  exact=FALSE)
+
+depth_test<-wilcox.test(timepoint_wide$mean_depth_BL,timepoint_wide$mean_depth_END,paired=TRUE,exact=FALSE)
+
+breadth_test<-wilcox.test(timepoint_wide$pct_1000x_BL,timepoint_wide$pct_1000x_END,paired=TRUE,exact=FALSE)
+
+timepoint_tests<-tibble(
+  measurement=c("Sequencing yield","Independent duplex molecules","Mean duplex depth","Bases covered at ≥1,000×"),
+  p_value=c(
+    yield_test$p.value,
+    molecule_test$p.value,
+    depth_test$p.value,
+    breadth_test$p.value)) %>%
+  mutate(adjusted_p=p.adjust(p_value,method="BH"))
+
+timepoint_tests
+```
+
+```{r summarise-review-reasons}
+review_reasons<-patient_qc %>%
+  mutate(
+    low_mean_depth=mean_depth<qc_limits$lower_mean_depth,
+    low_500x_coverage=pct_500x<qc_limits$lower_500x,
+    low_molecule_count=independent_duplex_molecules<qc_limits$lower_molecules,
+    high_zero_coverage=zero_percent>qc_limits$upper_zero_percent) %>%
+  filter(qc_status=="Review") %>%
+  select(
+    sample,
+    endpoint,
+    low_mean_depth,
+    low_500x_coverage,
+    low_molecule_count,
+    high_zero_coverage,
+    mean_depth,
+    independent_duplex_molecules,
+    zero_percent,
+    pct_500x,
+    pct_1000x)
+
+review_reasons
+```
+
+## 12.5 Plot timepoint comparisons
+
+```{r plot-timepoint-qc}
+timepoint_colours<-c("Baseline"="darkcyan","Post-radiotherapy"="lightpink4")
+
+plot_timepoint_yield<-ggplot(timepoint_qc,aes(x=timepoint,y=read_pairs_million,fill=timepoint))+
+  geom_boxplot(width=0.5,outlier.shape=NA,alpha=0.7)+
+  geom_jitter(width=0.08,colour="black")+
+  scale_fill_manual(values=timepoint_colours)+
+  labs(x="",y="Sequencing yield\n(million read pairs)")+
+  theme_unified()+
+  theme(legend.position="none")
+
+plot_timepoint_molecules<-ggplot(timepoint_qc,aes(x=timepoint,y=molecules_thousands,fill=timepoint))+
+  geom_boxplot(width=0.5,outlier.shape=NA,alpha=0.7)+
+  geom_jitter(width=0.08,colour="black")+
+  scale_fill_manual(values=timepoint_colours)+
+  labs(x="",y="Independent duplex\nmolecules (×10³)")+
+  theme_unified()+
+  theme(legend.position="none")
+
+plot_timepoint_depth<-ggplot(timepoint_qc,aes(x=timepoint,y=mean_depth,fill=timepoint))+
+  geom_boxplot(width=0.5,outlier.shape=NA,alpha=0.7)+
+  geom_jitter(width=0.08,colour="black")+
+  scale_fill_manual(values=timepoint_colours)+
+  labs(x="",y="Mean duplex-consensus\ncoverage (×)")+
+  theme_unified()+
+  theme(legend.position="none")
+
+figure_timepoint_balance<-patchwork::wrap_plots(
+  plot_timepoint_yield,
+  plot_timepoint_molecules,
+  plot_timepoint_depth,
+  ncol=3)+
+  patchwork::plot_annotation(tag_levels="A")
+
+figure_timepoint_balance
+```
+
+## 12.6 Save timepoint figure
+
+```{r save-timepoint-qc}
+ggsave(file.path(figure_path,"timepoint_qc_balance.pdf"),plot=figure_timepoint_balance,width=11,height=4)
+
+ggsave(file.path(figure_path,"timepoint_qc_balance.png"),plot=figure_timepoint_balance,width=11,height=4,dpi=600)
+```
+
+# 13 Publication figures
+
+## 13.1 Build figures
+
+```{r final-publication-figure-build, include=FALSE}
+  #Settings
+  point_size <- 0.55
+  point_alpha <- 0.60
+  box_width <- 0.45
+  jitter_width <- 0.08
+  box_linewidth <- 0.45
+  line_width <- 0.75
+
+  patient_col <- unname(unified_colours["Patient samples"])
+  healthy_col <- unname(unified_colours["Healthy controls"])
+  raw_col <- unname(unified_colours["Raw reads"])
+  duplex_col <- unname(unified_colours["Duplex consensus"])
+  ideal_col <- unname(unified_colours["Ideal duplex fraction"])
+
+  stage_cols <- c("Raw reads"=raw_col,"Duplex consensus"=duplex_col)
+  group_cols <- c("Healthy controls"=healthy_col,"Patient samples"=patient_col)
+  timepoint_cols <- c("Baseline"=unname(unified_colours["Baseline"]),
+                      "Post-radiotherapy"=unname(unified_colours["Post-radiotherapy"]))
+  saturation_cols <- c("Observed duplex fraction"=duplex_col,"Ideal duplex fraction"=ideal_col)
+
+  qc_theme <- theme_unified(base_size=10,base_family="sans")+
+    theme(axis.title=element_text(size=10),
+          axis.text=element_text(size=9,colour="black"),
+          axis.title.x=element_text(margin=margin(t=5)),
+          axis.title.y=element_text(margin=margin(r=6)),
+          axis.line=element_line(linewidth=0.45),
+          axis.ticks=element_line(linewidth=0.40),
+          axis.ticks.length=grid::unit(1.2,"mm"),
+          legend.title=element_text(size=9),
+          legend.text=element_text(size=8.5),
+          legend.key.height=grid::unit(3.5,"mm"),
+          legend.key.width=grid::unit(5,"mm"),
+          legend.margin=margin(0),
+          legend.box.margin=margin(0),
+          legend.box.spacing=grid::unit(0.5,"mm"),
+          legend.spacing.x=grid::unit(2,"mm"),
+          plot.margin=margin(7,7,6,7))
+
+  legend_bottom <- theme(legend.position="bottom",
+                         legend.direction="horizontal",
+                         legend.justification="center",
+                         legend.box.just="center",
+                         legend.margin=margin(0),
+                         legend.box.margin=margin(0),
+                         legend.box.spacing=grid::unit(0,"mm"),
+                         legend.text=element_text(size=8))
+
+  tag_theme <- theme(plot.tag=element_text(size=11,face="bold"),
+                     plot.tag.position=c(0.02,0.98),
+                     plot.tag.location="panel")
+
+  #Match single-category box width
+  single_box_scale <- scale_x_discrete(expand=expansion(add=c(0.80,0.80)))
+  multiple_box_scale <- scale_x_discrete(expand=expansion(add=c(0.30,0.30)))
+
+  box_layer <- function(fill=patient_col) {
+    geom_boxplot(width=box_width,outlier.shape=NA,fill=fill,colour="black",
+                 alpha=0.70,linewidth=box_linewidth,show.legend=FALSE)
+  }
+
+  point_layer <- function(width=jitter_width) {
+    geom_jitter(width=width,height=0,size=point_size,alpha=point_alpha,colour="black",show.legend=FALSE)
+  }
+
+  qc_figure_dir <- if(exists("figure_path") && length(figure_path)==1 &&
+                      !is.na(figure_path) && nzchar(figure_path)) figure_path else "."
+
+  dir.create(qc_figure_dir,recursive=TRUE,showWarnings=FALSE)
+
+  save_qc <- function(plot,file,width,height) {
+    ggsave(file.path(qc_figure_dir,paste0(file,".pdf")),plot=plot,width=width,height=height,useDingbats=FALSE)
+    ggsave(file.path(qc_figure_dir,paste0(file,".png")),plot=plot,width=width,height=height,dpi=600,bg="white")
+  }
+
+  set.seed(123)
+
+  #Main Figure 1
+  target_gene_order <- c("BAP1","SF3B1","EIF1AX","MBD4","GNAQ","GNA11","PLCB4","CYSLTR2")
+
+  patient_gene_plot_data <- gene_coverage %>%
+    filter(sample_group=="Patient samples") %>%
+    mutate(gene=factor(as.character(gene),levels=target_gene_order))
+
+  plot_target_depth <- ggplot(patient_gene_plot_data,aes(x=gene,y=mean_gene_coverage))+
+    geom_boxplot(width=0.58,outlier.shape=NA,fill=patient_col,colour="black",alpha=0.72,linewidth=box_linewidth)+
+    geom_jitter(width=0.10,height=0,size=0.42,alpha=0.52,colour="black",show.legend=FALSE)+
+    scale_y_continuous(labels=label_comma(),expand=expansion(mult=c(0.02,0.08)))+
+    labs(x=NULL,y="Mean target coverage (x)")+
+    qc_theme+
+    theme(axis.text.x=element_text(angle=30,hjust=1,vjust=1))
+
+  patient_gene_breadth <- base_gene %>%
+    filter(patient!="1452",sample_group=="Patient samples") %>%
+    select(sample,patient,gene,pct_500x,pct_1000x) %>%
+    pivot_longer(cols=c(pct_500x,pct_1000x),names_to="coverage_threshold",values_to="percent_covered") %>%
+    mutate(
+      gene=factor(gene,levels=target_gene_order),
+      coverage_threshold=recode(coverage_threshold,pct_500x=">=500x",pct_1000x=">=1,000x"),
+      coverage_threshold=factor(
+        coverage_threshold,
+        levels=c(">=500x",">=1,000x")))
+
+  gene_breadth_summary_main <- patient_gene_breadth %>%
+    group_by(gene,coverage_threshold) %>%
+    summarise(
+      median=median(percent_covered,na.rm=TRUE),
+      Q1=quantile(percent_covered,0.25,na.rm=TRUE),
+      Q3=quantile(percent_covered,0.75,na.rm=TRUE),
+      .groups="drop")
+
+  breadth_dodge <- position_dodge(width=0.52)
+  breadth_cols <- c(">=500x"=patient_col,">=1,000x"="#D55E00")
+
+  plot_target_breadth <- ggplot(gene_breadth_summary_main,aes(x=gene,y=median,colour=coverage_threshold))+
+    geom_linerange(aes(ymin=Q1,ymax=Q3),position=breadth_dodge,linewidth=0.65)+
+    geom_point(position=breadth_dodge,size=2.1)+
+    scale_colour_manual(values=breadth_cols)+
+    scale_y_continuous(
+      limits=c(0,100),breaks=seq(0,100,20),
+      labels=label_percent(scale=1),
+      expand=expansion(mult=c(0,0.02)))+
+    labs(x=NULL,y="Target bases covered (%)",colour="Coverage threshold")+
+    qc_theme+legend_bottom+
+    theme(axis.text.x=element_text(angle=30,hjust=1,vjust=1))
+
+  patient_interval_support <- interval_data %>%
+    filter(endpoint%in%c("Baseline","Post-radiotherapy")) %>%
+    group_by(name,interval_number) %>%
+    summarise(
+      patient_samples=n(),
+      percent_samples_500x=100*mean(mean_coverage>=500,na.rm=TRUE),
+      median_coverage=median(mean_coverage,na.rm=TRUE),
+      .groups="drop") %>%
+    mutate(
+      name=factor(name,levels=target_gene_order),
+      support_class=if_else(
+        percent_samples_500x==100,
+        "All samples >=500x",
+        "Some samples <500x"))
+
+  interval_support_counts <- patient_interval_support %>%
+    summarise(
+      intervals=n(),
+      all_samples_500x=sum(percent_samples_500x==100),
+      at_least_95_percent_500x=sum(percent_samples_500x>=95))
+
+  interval_gene_support <- patient_interval_support %>%
+    group_by(name) %>%
+    summarise(
+      intervals=n(),
+      all_samples=sum(percent_samples_500x==100),
+      at_least_95_percent=sum(percent_samples_500x>=95),
+      .groups="drop") %>%
+    pivot_longer(cols=c(all_samples,at_least_95_percent),names_to="support_threshold",values_to="passing_intervals") %>%
+    mutate(
+      name=factor(as.character(name),levels=target_gene_order),
+      percent_intervals=100*passing_intervals/intervals,
+      count_label=paste0(passing_intervals,"/",intervals),
+      support_threshold=recode(support_threshold,all_samples="100% of samples",at_least_95_percent=">=95% of samples"),
+      support_threshold=factor(
+        support_threshold,
+        levels=c("100% of samples",">=95% of samples")))
+
+  interval_dodge <- position_dodge(width=0.72)
+  interval_cols <- c("100% of samples"=patient_col,">=95% of samples"="#D55E00")
+
+  plot_interval_support <- ggplot(interval_gene_support,aes(x=name,y=percent_intervals,fill=support_threshold))+
+    geom_col(position=interval_dodge,width=0.62,colour="black",linewidth=0.30)+
+    geom_text(aes(label=count_label),position=interval_dodge,vjust=-0.35,size=2.7,show.legend=FALSE)+
+    scale_fill_manual(values=interval_cols)+
+    scale_y_continuous(breaks=seq(0,100,20),labels=label_percent(scale=1),expand=expansion(mult=c(0,0.08)))+
+    coord_cartesian(ylim=c(0,108),clip="off")+
+    labs(x=NULL,y="Capture intervals meeting\n500x criterion (%)",fill="Patient-sample support")+
+    qc_theme+legend_bottom+
+    theme(axis.text.x=element_text(angle=30,hjust=1,vjust=1))
+
+  main_panel <- wrap_plots(plot_target_depth,plot_target_breadth,plot_interval_support,ncol=1,heights=c(1.05,0.95,1.0))+
+    plot_annotation(
+      tag_levels="A",
+      caption=paste0(
+        "Patient samples, n=",n_distinct(patient_gene_plot_data$sample),
+        ". ",interval_support_counts$all_samples_500x,"/",
+        interval_support_counts$intervals,
+        " intervals reached 500x in every sample; ",
+        interval_support_counts$at_least_95_percent_500x,"/",
+        interval_support_counts$intervals,
+        " reached 500x in at least 95% of samples."),
+      theme=tag_theme+
+        theme(plot.caption=element_text(size=8,hjust=0,margin=margin(t=5))))
+
+  save_qc(main_panel,"Figure_1_Targeted_panel_coverage_QC",7.2,8.6)
+
+  #Supplementary Figure S1
+  plot_yield <- yield_data %>%
+    mutate(group="Patient samples") %>%
+    ggplot(aes(x=group,y=read_pairs_million))+
+    box_layer()+point_layer()+single_box_scale+
+    labs(x=NULL,y="Read pairs\n(millions)")+
+    qc_theme+
+    theme(axis.text.x=element_blank(),axis.ticks.x=element_blank())
+
+  plot_molecules <- molecule_data %>%
+    mutate(group="Patient samples") %>%
+    ggplot(aes(x=group,y=molecules_thousands))+
+    box_layer()+point_layer()+single_box_scale+
+    scale_y_continuous(labels=label_comma())+
+    labs(x=NULL,y="Duplex molecules\n(\u00D710\u00B3)")+
+    qc_theme+
+    theme(axis.text.x=element_blank(),axis.ticks.x=element_blank())
+
+  coverage_plot_data <- coverage_data %>%
+    mutate(stage=factor(stage,levels=c("Raw reads","Duplex consensus")))
+
+  plot_coverage <- ggplot(coverage_plot_data,aes(x=stage,y=mean_target_coverage,fill=stage))+
+    geom_boxplot(width=box_width,outlier.shape=NA,colour="black",alpha=0.70,linewidth=box_linewidth,show.legend=FALSE)+
+    point_layer()+
+    scale_fill_manual(values=stage_cols)+
+    scale_x_discrete(labels=c("Raw reads"="Raw","Duplex consensus"="Duplex"),expand=expansion(add=c(0.30,0.30)))+
+    scale_y_log10(breaks=c(1000,10000,100000),labels=c("1k","10k","100k"))+
+    labs(x=NULL,y="Target coverage\n(\u00D7; log scale)")+
+    qc_theme
+
+  plot_saturation <- ggplot(saturation_summary,aes(x=sequencing_fraction))+
+    geom_ribbon(aes(ymin=observed_Q1,ymax=observed_Q3),fill=duplex_col,alpha=0.15)+
+    geom_ribbon(aes(ymin=ideal_Q1,ymax=ideal_Q3),fill=ideal_col,alpha=0.10)+
+    geom_line(aes(y=observed_median,colour="Observed duplex fraction"),linewidth=line_width)+
+    geom_line(aes(y=ideal_median,colour="Ideal duplex fraction"),linewidth=line_width,linetype="dashed")+
+    scale_colour_manual(values=saturation_cols)+
+    scale_x_continuous(limits=c(0,100),breaks=seq(0,100,20),expand=expansion(mult=c(0,0.02)))+
+    scale_y_continuous(limits=c(0,100),breaks=seq(0,100,20),
+                       labels=label_percent(scale=1),
+                       expand=expansion(mult=c(0,0.02)))+
+    labs(x="Sequencing data used (%)",y="Duplex fraction (%)",colour=NULL)+
+    qc_theme+legend_bottom
+
+  plot_breadth <- ggplot(breadth_summary,aes(x=coverage_threshold,group=stage))+
+    geom_ribbon(aes(ymin=lower_IQR,ymax=upper_IQR,fill=stage),alpha=0.15,colour=NA,show.legend=FALSE)+
+    geom_line(aes(y=median,colour=stage),linewidth=line_width)+
+    geom_point(aes(y=median,colour=stage),size=point_size)+
+    scale_colour_manual(values=stage_cols)+
+    scale_fill_manual(values=stage_cols)+
+    scale_x_log10(breaks=c(10,20,50,100,250,500,1000),labels=c("10","20","50","100","250","500","1k"))+
+    scale_y_continuous(limits=c(0,100),breaks=seq(0,100,20),
+                       labels=label_percent(scale=1),
+                       expand=expansion(mult=c(0,0.02)))+
+    labs(x="Coverage threshold (\u00D7)",y="Target bases\ncovered (%)",colour=NULL)+
+    qc_theme+legend_bottom
+
+  #Align panels in separate rows
+  supp_s1_top <- wrap_plots(plot_yield,plot_molecules,plot_coverage,ncol=3,widths=c(1,1,1))
+
+  supp_s1_bottom <- wrap_plots(plot_saturation,plot_breadth,ncol=2,widths=c(1,1))
+
+  supp_s1 <- wrap_plots(supp_s1_top,supp_s1_bottom,ncol=1,heights=c(1,1.15))+
+    plot_annotation(tag_levels="A",theme=tag_theme)
+
+  save_qc(supp_s1,"Supplementary_Figure_S1_Sequencing_and_consensus_performance",7.2,6.2)
+
+  #Supplementary Figure S2
+  plot_uniformity <- ggplot(uniformity_paired,aes(x=raw,y=duplex))+
+    geom_abline(slope=1,intercept=0,linetype="dashed",colour="grey50",linewidth=0.60)+
+    geom_point(size=point_size,alpha=point_alpha,colour=duplex_col)+
+    coord_equal(xlim=c(1,1.65),ylim=c(1,1.65),expand=FALSE)+
+    scale_x_continuous(breaks=seq(1,1.6,0.2))+
+    scale_y_continuous(breaks=seq(1,1.6,0.2))+
+    labs(x="Raw-read Fold-80\nbase penalty",y="Duplex-consensus\nFold-80 base penalty")+
+    qc_theme
+
+  plot_duplex_fraction <- ggplot(duplex_data,aes(x=duplex_fraction,y=ideal_duplex_fraction))+
+    geom_abline(slope=1,intercept=0,linetype="dashed",colour="grey50",linewidth=0.60)+
+    geom_point(size=point_size,alpha=point_alpha,colour=duplex_col)+
+    coord_equal(xlim=c(50,102),ylim=c(50,102),expand=FALSE)+
+    scale_x_continuous(breaks=seq(50,100,10),labels=label_percent(scale=1))+
+    scale_y_continuous(breaks=seq(50,100,10),labels=label_percent(scale=1))+
+    labs(x="Observed duplex\nfraction (%)",y="Ideal duplex\nfraction (%)")+
+    qc_theme
+
+  supp_s2 <- wrap_plots(plot_uniformity,plot_duplex_fraction,ncol=2,widths=c(1,1))+
+    plot_annotation(tag_levels="A",theme=tag_theme)
+
+  save_qc(supp_s2,"Supplementary_Figure_S2_Fold80_and_duplex_fraction",7.2,3.9)
+
+  #Supplementary Figure S3
+  plot_family_size <- ggplot(duplex_family_size_summary,aes(x=family_size_category,y=median_percent))+
+    geom_col(width=0.68,fill=patient_col,colour="black",linewidth=0.35,alpha=0.80)+
+    geom_errorbar(aes(ymin=Q1,ymax=Q3),width=0.16,linewidth=0.50)+
+    geom_text(aes(y=Q3,label=paste0(sprintf("%.1f",median_percent),"%")),vjust=-0.45,size=3.2)+
+    scale_y_continuous(labels=label_percent(scale=1),expand=expansion(mult=c(0,0.14)))+
+    labs(
+      x="Minimum reads in each strand family",
+      y="Duplex families per sample (%)",
+      subtitle="Bars show medians; whiskers show the interquartile range",
+      caption=paste0(
+        "Categories use BA, the smaller strand family; ",
+        "the larger AB family may contain additional reads."))+
+    qc_theme+
+    theme(plot.subtitle=element_text(size=9),plot.caption=element_text(size=8,hjust=0,margin=margin(t=5)))
+
+  save_qc(plot_family_size,"Supplementary_Figure_S3_UMI_family_size_distribution",6.2,4.8)
+
+  #Supplementary Figure S4
+  gene_plot_data <- gene_coverage %>%
+    mutate(gene=factor(gene,levels=c("BAP1","SF3B1","EIF1AX","MBD4",
+                                     "GNAQ","GNA11","PLCB4","CYSLTR2")),
+           sample_group=factor(sample_group,
+                               levels=c("Healthy controls","Patient samples")))
+
+  plot_gene <- ggplot(gene_plot_data,aes(x=gene,y=mean_gene_coverage,fill=sample_group))+
+    geom_boxplot(position=position_dodge(width=0.70),width=0.55,
+                 outlier.shape=NA,colour="black",alpha=0.70,
+                 linewidth=box_linewidth)+
+    geom_point(aes(group=sample_group),
+               position=position_jitterdodge(jitter.width=0.06,dodge.width=0.70),
+               size=point_size,alpha=point_alpha,colour="black",
+               show.legend=FALSE)+
+    scale_fill_manual(values=group_cols)+
+    scale_y_continuous(labels=label_comma())+
+    labs(x="Targeted gene",y="Duplex-consensus\ncoverage (\u00D7)",fill=NULL)+
+    qc_theme+legend_bottom+
+    theme(axis.text.x=element_text(angle=30,hjust=1,vjust=1))
+
+  plot_base_depth <- ggplot(base_threshold_summary,aes(x=threshold,group=sample_group))+
+    geom_ribbon(aes(ymin=Q1,ymax=Q3,fill=sample_group),alpha=0.16,colour=NA,show.legend=FALSE)+
+    geom_line(aes(y=median,colour=sample_group),linewidth=line_width)+
+    geom_point(aes(y=median,colour=sample_group),size=point_size)+
+    scale_colour_manual(values=group_cols)+
+    scale_fill_manual(values=group_cols)+
+    scale_x_discrete(labels=c("250\u00D7","500\u00D7","1,000\u00D7","2,000\u00D7","3,000\u00D7"))+
+    scale_y_continuous(limits=c(0,100),breaks=seq(0,100,20),
+                       labels=label_percent(scale=1),
+                       expand=expansion(mult=c(0,0.02)))+
+    labs(x="Coverage threshold (\u00D7)",y="Target bases\ncovered (%)",colour=NULL)+
+    qc_theme+legend_bottom
+
+  supp_s4 <- wrap_plots(plot_gene,plot_base_depth,ncol=1,heights=c(1.05,0.95))+
+    plot_annotation(tag_levels="A",theme=tag_theme)
+
+  save_qc(supp_s4,"Supplementary_Figure_S4_Gene_and_base_coverage_by_group",7.2,7.8)
+
+  #Supplementary Figure S5
+  publication_interval_summary <- interval_data %>%
+    filter(endpoint%in%c("Baseline","Post-radiotherapy")) %>%
+    group_by(name,interval_number) %>%
+    summarise(
+      patient_samples=n(),
+      minimum=min(mean_coverage,na.rm=TRUE),
+      Q1=quantile(mean_coverage,0.25,na.rm=TRUE),
+      median=median(mean_coverage,na.rm=TRUE),
+      Q3=quantile(mean_coverage,0.75,na.rm=TRUE),
+      maximum=max(mean_coverage,na.rm=TRUE),
+      percent_samples_500x=100*mean(mean_coverage>=500,na.rm=TRUE),
+      .groups="drop") %>%
+    mutate(
+      name=factor(name,levels=target_gene_order),
+      interval_label=factor(interval_number),
+      support_class=case_when(
+        percent_samples_500x==100 ~ "100% of samples",
+        percent_samples_500x>=95 ~ ">=95% of samples",
+        TRUE ~ "<95% of samples"),
+      support_class=factor(
+        support_class,
+        levels=c("100% of samples",">=95% of samples","<95% of samples")))
+
+  interval_support_cols <- c("100% of samples"=patient_col,">=95% of samples"="#D55E00","<95% of samples"="#CC79A7")
+
+  make_interval_summary_plot <- function(data,y_title=TRUE) {
+    ggplot(data,aes(x=median,y=interval_label,colour=support_class))+
+      geom_vline(xintercept=500,linetype="dashed",colour="grey45",linewidth=0.55)+
+      geom_segment(aes(x=minimum,xend=maximum,y=interval_label,yend=interval_label),colour="grey72",linewidth=0.35)+
+      geom_segment(aes(x=Q1,xend=Q3,y=interval_label,yend=interval_label),linewidth=1.05)+
+      geom_point(size=1.7)+
+      facet_grid(rows=vars(name),scales="free_y",space="free_y",switch="y")+
+      scale_colour_manual(
+        values=interval_support_cols,
+        breaks=c("100% of samples",">=95% of samples","<95% of samples"),
+        labels=c("100%","\u226595%","<95%"),
+        drop=FALSE)+
+      scale_x_log10(
+        breaks=c(250,500,1000,2000,5000),
+        labels=c("250","500","1k","2k","5k"),
+        expand=expansion(mult=c(0.03,0.08)))+
+      scale_y_discrete(limits=function(x) rev(x))+
+      labs(
+        x="Interval coverage (\u00D7; log scale)",
+        y=if(y_title) "Capture interval" else NULL,
+        colour="Samples \u2265500\u00D7")+
+      qc_theme+
+      theme(
+        text=element_text(size=10),
+        axis.title=element_text(size=10),
+        axis.text=element_text(size=10,colour="black"),
+        legend.position="none",
+        strip.placement="outside",
+        strip.background=element_blank(),
+        strip.text.y.left=element_text(angle=0,size=10,face="bold"),
+        panel.spacing.y=grid::unit(0.7,"mm"),
+        plot.margin=margin(5,5,4,13))
+  }
+
+  plot_intervals_sf3b1 <- make_interval_summary_plot(publication_interval_summary %>% filter(name=="SF3B1"))
+
+  plot_intervals_other <- make_interval_summary_plot(
+    publication_interval_summary %>% filter(name!="SF3B1"),
+    y_title=FALSE)
+
+  plot_intervals <- (plot_intervals_sf3b1+plot_intervals_other+ plot_layout(ncol=2,widths=c(1,1)))+
+    plot_annotation(
+      caption=paste0(
+        "Points show medians; thick lines show IQRs; thin lines show ranges.\n",
+        "Colours show samples reaching \u2265500\u00D7: ",
+        "teal, 100%; orange, \u226595%; pink, <95%."),
+      theme=theme(
+        plot.caption=element_text(size=10,hjust=0,margin=margin(t=3))))&
+    theme(text=element_text(size=10))
+
+  save_qc(plot_intervals,"Supplementary_Figure_S5_Target_interval_coverage_summary",7.2,6.4)
+
+  #Supplementary Figure S6
+  timepoint_data <- timepoint_qc %>%
+    mutate(timepoint=factor(timepoint,levels=c("Baseline","Post-radiotherapy")))
+
+  make_timepoint_plot <- function(data,y,ylabel,comma=FALSE) {
+    p <- ggplot(data,aes(x=timepoint,y={{y}},fill=timepoint))+
+      geom_boxplot(width=box_width,outlier.shape=NA,colour="black",
+                   alpha=0.70,linewidth=box_linewidth,show.legend=FALSE)+
+      point_layer()+
+      scale_fill_manual(values=timepoint_cols)+
+      scale_x_discrete(labels=c("Baseline"="Baseline",
+                                "Post-radiotherapy"="Post-\nradiotherapy"),
+                       expand=expansion(add=c(0.30,0.30)))+
+      labs(x=NULL,y=ylabel)+
+      qc_theme
+
+    if(comma) p <- p+scale_y_continuous(labels=label_comma())
+    p
+  }
+
+  plot_tp_yield <- make_timepoint_plot(timepoint_data,read_pairs_million,"Read pairs\n(millions)")
+
+  plot_tp_molecules <- make_timepoint_plot(timepoint_data,molecules_thousands,"Duplex molecules\n(\u00D710\u00B3)",TRUE)
+
+  plot_tp_depth <- make_timepoint_plot(timepoint_data,mean_depth,"Duplex-consensus\ncoverage (\u00D7)",TRUE)
+
+  supp_s6 <- wrap_plots(plot_tp_yield,plot_tp_molecules,plot_tp_depth,ncol=3,widths=c(1,1,1))+
+    plot_annotation(tag_levels="A",theme=tag_theme)
+
+  save_qc(supp_s6,"Supplementary_Figure_S6_Endpoint_sequencing_QC",7.2,3.9)
+```
+
+## 13.2 Main targeted-panel QC figure
+
+```{r main-targeted-panel-qc, echo=FALSE, fig.width=7.2, fig.height=8.6, dpi=150}
+main_panel
+```
+
+## 13.3 Supplementary figures
+
+```{r supplementary-figures, echo=FALSE, out.width='100%', fig.align='center'}
+supplementary_figure_files <- file.path(
+  qc_figure_dir,
+  c(
+    "Supplementary_Figure_S1_Sequencing_and_consensus_performance.png",
+    "Supplementary_Figure_S2_Fold80_and_duplex_fraction.png",
+    "Supplementary_Figure_S3_UMI_family_size_distribution.png",
+    "Supplementary_Figure_S4_Gene_and_base_coverage_by_group.png",
+    "Supplementary_Figure_S5_Target_interval_coverage_summary.png",
+    "Supplementary_Figure_S6_Endpoint_sequencing_QC.png"))
+
+stopifnot(all(file.exists(supplementary_figure_files)))
+knitr::include_graphics(supplementary_figure_files)
+```

@@ -1,0 +1,16 @@
+{
+  "input": "/replace/with/samplesheet.local.tsv",
+  "outdir": "results",
+  "ref_fasta": "/replace/with/reference/GRCh38.fa",
+  "ref_fasta_fai": "/replace/with/reference/GRCh38.fa.fai",
+  "ref_dict": "/replace/with/reference/GRCh38.dict",
+  "bwamem2_index": "/replace/with/bwa-mem2-index/GRCh38.fa.*",
+  "panel_intervals": "/replace/with/panel/targets.interval_list",
+  "bait_intervals": "/replace/with/panel/baits.interval_list",
+  "target_intervals": "/replace/with/panel/targets.interval_list",
+  "duplex_min_reads": "2 1 1",
+  "duplex_min_input_baseq": 20,
+  "duplex_min_base_quality": 45,
+  "duplex_max_base_error_rate": 0.2,
+  "dedup_conda_env": "/replace/with/original-study-gatk-samtools-environment"
+}

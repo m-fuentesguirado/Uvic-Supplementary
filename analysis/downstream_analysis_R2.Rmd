@@ -1,0 +1,578 @@
+---
+title: "Fragmentomics analysis"
+author: "Miriam Fuentes"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: false
+    code_folding: show
+    theme: cosmo
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+# Setup
+
+```{r setup, include=FALSE}
+#Chunk options
+knitr::opts_chunk$set(echo = TRUE,warning = FALSE,message = FALSE,fig.width = 8,fig.height = 5,fig.align = "center")
+
+#Packages
+library(knitr)
+library(tidyverse)
+library(data.table)
+library(patchwork)
+timepoint_colours<-c("BL"="darkcyan","END"="lightpink4")
+
+timepoint_labels<-c("BL"="Baseline","END"="After radiotherapy")
+
+common_theme<-theme_classic(base_size=15)+
+  theme(
+    plot.title=element_text(size=17,face="bold"),
+    axis.title.y=element_text(size=16,face="bold"),
+    axis.text.y=element_text(size=13,face="bold"),
+    axis.text.x=element_blank(),
+    axis.ticks.x=element_blank(),
+    legend.title=element_text(size=14,face="bold"),
+    legend.text=element_text(size=13),
+    legend.position="right",
+    aspect.ratio=1)
+```
+
+# 1 Fragment-count preprocessing
+
+## 1.1 Extract fragment sizes
+
+```bash
+analysis_root="../../nextflow_integrator/devonvolutor_dedup/deconvolutor_dedup/deconvolutor_analysis"
+mkdir -p "$analysis_root/scripts"
+cd "$analysis_root"
+
+cat > scripts/get_sizes.py <<'PY'
+import pysam, glob, os
+from collections import Counter
+
+path="../../../results_mapped_dedup/dedup_mapped"
+out="counts"
+
+os.makedirs(out,exist_ok=True)
+
+for bam in glob.glob(path+"/*_dedup.bam"):
+    counts=Counter()
+
+    with pysam.AlignmentFile(bam,"rb") as f:
+        for read in f:
+            if not read.is_read1: continue
+            if not read.is_paired: continue
+            if read.is_unmapped or read.mate_is_unmapped: continue
+            if read.is_secondary or read.is_supplementary: continue
+            if read.is_duplicate: continue
+            if read.mapping_quality<=30: continue
+
+            size=abs(read.template_length)
+
+            if 50<=size<=250:
+                counts[size]+=1
+
+    name=os.path.basename(bam).replace("_dedup.bam","")
+
+    with open(out+"/"+name+"_size.txt","w") as f:
+        for size in range(50,251):
+            f.write(f"{size}\t{counts[size]}\n")
+
+    print(name,sum(counts.values()))
+PY
+```
+
+## 1.2 Run deconvolution
+
+```bash
+cat > run_deconv.sh <<'BASH'
+#!/bin/bash
+analysis_root="../../nextflow_integrator/devonvolutor_dedup/deconvolutor_dedup/deconvolutor_analysis"
+cd "$analysis_root"
+
+counts="counts"
+results="results"
+
+mkdir -p "$results"
+
+echo "sample,amplitude_ratio,entropy_ratio" > "$results/deconvolution_results.csv"
+
+for file in "$counts"/*_size.txt; do
+
+    name=$(basename "$file" _size.txt)
+
+    cp "$file" example_size.txt
+    cp "$file" example_size_sWGS.txt
+
+    python size_decov.py > output.txt
+
+    amp=$(grep "amplitude ratio" output.txt | tail -1 | awk '{print $NF}')
+    ent=$(grep "entropy ratio" output.txt | tail -1 | awk '{print $NF}')
+
+    echo "$name,$amp,$ent" >> "$results/deconvolution_results.csv"
+
+    echo "$name done"
+
+done
+BASH
+```
+
+# 2 Load and prepare data
+
+## 2.1 Paths and settings
+
+```{r paths-and-settings}
+project_path <- file.path("..","..","nextflow_integrator")
+root <- file.path(project_path,"devonvolutor_dedup","deconvolutor_dedup","deconvolutor_analysis")
+
+results_path <- file.path(root, "results")
+count_path <- file.path(root, "counts")
+
+peaks <- c(121,131,141,151,159,167,177,188,199)
+```
+
+## 2.2 Load ratios, counts and components
+
+```{r load-fragmentomics-data}
+#Load ratios and fragment counts
+results <- fread(file.path(results_path,"deconvolution_ratios.csv")) %>%
+  filter(model=="constrained_L2") %>%
+  mutate(
+    patient=sub("_(BL|END)$","",sample),
+    timepoint=sub("^.*_","",sample),
+    timepoint=factor(timepoint,levels=c("BL","END")))
+
+files <- list.files(count_path,pattern="_size.txt$",full.names=TRUE)
+
+size_data <- lapply(files,function(f) {
+  x <- fread(f,col.names=c("size","count"))
+  x$sample <- sub("_size.txt","",basename(f))
+  x
+}) %>%
+  bind_rows() %>%
+  mutate(patient=sub("_(BL|END)$","",sample),timepoint=sub("^.*_","",sample))
+
+#Load fitted components
+components <- fread(file.path(results_path,"deconvolution_components_L2.csv")) %>%
+  arrange(sample,location) %>%
+  group_by(sample) %>%
+  mutate(component=peaks[row_number()]) %>%
+  ungroup() %>%
+  mutate(patient=sub("_(BL|END)$","",sample),timepoint=sub("^.*_","",sample))
+table(results$timepoint)
+length(unique(size_data$sample))
+table(components$component)
+```
+
+# 3 Main analysis
+
+## 3.1 Pooled fragment-size profile
+
+```{r pooled-fragment-profile}
+profile <- size_data %>%
+  group_by(timepoint,size) %>%
+  summarise(count=sum(count),.groups="drop") %>%
+  group_by(timepoint) %>%
+  mutate(freq=100*count/sum(count))
+ggplot(profile,aes(size,freq,colour=timepoint)) +
+  geom_line(linewidth=1) +
+  scale_colour_manual(values=timepoint_colours,labels=timepoint_labels) +
+  labs(x="Fragment size (bp)",y="Frequency (%)",colour="") +
+  theme_classic(base_size=15)
+```
+
+## 3.2 Global deconvolution ratios
+
+```{r global-deconvolution-ratios}
+paired <- results %>%
+  select(patient,timepoint,amplitude_ratio,entropy_ratio) %>%
+  pivot_wider(names_from=timepoint,values_from=c(amplitude_ratio,entropy_ratio))
+
+results %>%
+  group_by(timepoint) %>%
+  summarise(n=n(),amplitude=median(amplitude_ratio),entropy=median(entropy_ratio))
+amp_ratio_test <- wilcox.test(paired$amplitude_ratio_END,paired$amplitude_ratio_BL,paired=TRUE,exact=FALSE)
+
+entropy_ratio_test <- wilcox.test(paired$entropy_ratio_END,paired$entropy_ratio_BL,paired=TRUE,exact=FALSE)
+
+amp_ratio_test
+entropy_ratio_test
+```
+
+# 4 Secondary analyses
+
+## 4.1 Fragment-size metrics
+
+```{r fragment-size-metrics}
+frag <- size_data %>%
+  group_by(patient,timepoint) %>%
+  summarise(
+    short150=100*sum(count[size<150])/sum(count),
+    short159=100*sum(count[size<159])/sum(count),
+    short_long=sum(count[size>=100 & size<=150])/
+               sum(count[size>=151 & size<=220]),
+    .groups="drop") %>%
+  pivot_wider(names_from=timepoint,values_from=c(short150,short159,short_long))
+
+frag_tests <- data.frame(
+  metric=c("<150 bp","<159 bp","Short/long ratio"),
+  BL=c(median(frag$short150_BL),median(frag$short159_BL),median(frag$short_long_BL)),
+  END=c(median(frag$short150_END),median(frag$short159_END),median(frag$short_long_END)),
+  change=c(
+    median(frag$short150_END-frag$short150_BL),
+    median(frag$short159_END-frag$short159_BL),
+    median(frag$short_long_END-frag$short_long_BL)),
+  p=c(
+    wilcox.test(frag$short150_END,frag$short150_BL,paired=TRUE,exact=FALSE)$p.value,
+    wilcox.test(frag$short159_END,frag$short159_BL,paired=TRUE,exact=FALSE)$p.value,
+    wilcox.test(frag$short_long_END,frag$short_long_BL,
+                paired=TRUE,exact=FALSE)$p.value))
+
+frag_tests$p_adj <- p.adjust(frag_tests$p,"BH")
+
+frag_tests
+```
+
+## 4.2 Component amplitudes
+
+```{r component-amplitude-tests}
+amp_tests <- data.frame()
+
+for (p in peaks) {
+  x <- components %>%
+    filter(component==p) %>%
+    select(patient,timepoint,amplitude) %>%
+    pivot_wider(names_from=timepoint,values_from=amplitude)
+
+  test <- wilcox.test(x$END,x$BL,paired=TRUE,exact=FALSE)
+
+  amp_tests <- rbind(amp_tests,data.frame(
+    component=p,
+    BL=median(x$BL),
+    END=median(x$END),
+    change=median(x$END-x$BL),
+    p=test$p.value))
+}
+
+amp_tests$p_adj <- p.adjust(amp_tests$p,"BH")
+
+amp_tests
+amp_tests %>% filter(p_adj<0.05)
+```
+
+## 4.3 Component entropy
+
+### 4.3.1 Prepare entropy data
+
+```{r prepare-component-entropy}
+components <- components %>%
+  mutate(
+    entropy=log(4*pi*scale),
+    entropy_group=case_when(
+      component %in% c(121,131) ~ "121/131",
+      component %in% c(141,151) ~ "141/151",
+      component==159 ~ "159",
+      component>=167 ~ "167+"))
+entropy_data <- components %>%
+  distinct(sample,patient,timepoint,entropy_group,.keep_all=TRUE)
+```
+
+### 4.3.2 Test entropy changes
+
+```{r component-entropy-tests}
+groups <- c("121/131","141/151","159","167+")
+
+entropy_tests <- data.frame()
+
+for (g in groups) {
+  x <- entropy_data %>%
+    filter(entropy_group==g) %>%
+    select(patient,timepoint,entropy) %>%
+    pivot_wider(names_from=timepoint,values_from=entropy)
+
+  test <- wilcox.test(x$END,x$BL,paired=TRUE,exact=FALSE)
+
+  entropy_tests <- rbind(entropy_tests,data.frame(
+    group=g,
+    BL=median(x$BL),
+    END=median(x$END),
+    change=median(x$END-x$BL),
+    p=test$p.value))
+}
+
+entropy_tests$p_adj <- p.adjust(entropy_tests$p,"BH")
+
+entropy_tests
+```
+
+## 4.4 Fragment-size-specific changes
+
+```{r fragment-size-tests}
+size_freq <- size_data %>%
+  group_by(sample,patient,timepoint) %>%
+  mutate(freq=100*count/sum(count)) %>%
+  ungroup()
+
+size_paired <- size_freq %>%
+  select(patient,timepoint,size,freq) %>%
+  pivot_wider(names_from=timepoint,values_from=freq)
+size_tests <- size_paired %>%
+  group_by(size) %>%
+  summarise(
+    BL_median=median(BL),
+    END_median=median(END),
+    change=median(END-BL),
+    p=wilcox.test(END,BL,paired=TRUE,exact=FALSE)$p.value,
+    .groups="drop") %>%
+  mutate(p_adj=p.adjust(p,"BH"))
+size_tests %>%
+  arrange(p_adj,p) %>%
+  head(20)
+size_tests %>%
+  filter(size>=115 & size<=135)
+```
+
+## 4.5 Fragments 115-125 bp
+
+```{r fragment-window-analysis}
+region121 <- size_data %>%
+  group_by(patient,timepoint) %>%
+  summarise(percent_115_125= 100*sum(count[size>=115 & size<=125])/sum(count),.groups="drop") %>%
+  pivot_wider(names_from=timepoint,values_from=percent_115_125)
+wilcox.test(region121$END,region121$BL,paired=TRUE,exact=FALSE)
+region121 %>%
+  summarise(BL=median(BL),END=median(END),change=median(END-BL))
+```
+
+# 5 Figures
+
+## 5.1 Build figure panels
+
+```{r build-fragmentomics-figures}
+figure_path <- file.path(project_path,"fragmentomics","figures")
+dir.create(figure_path,recursive=TRUE,showWarnings=FALSE)
+
+plot_colours <- c("BL"="darkcyan","END"="lightpink4")
+plot_labels <- c("BL"="Baseline","END"="Post-RT")
+
+#Panel A: component amplitudes
+main_A <- ggplot(amp_tests,aes(factor(component),change))+
+  geom_hline(yintercept=0,linetype="dashed",colour="grey60")+
+  geom_segment(aes(xend=factor(component),y=0,yend=change),colour="grey70")+
+  geom_point(shape=21,fill="white",colour="grey50",size=2)+
+  geom_point(data=amp_tests %>% filter(component==121),shape=21,fill="darkcyan",colour="black",size=2.5)+
+  labs(x="Fitted component (bp)",y="Amplitude change\n(Post-RT - baseline)")+
+  theme_classic(base_size=10)
+
+#Panel B: amplitude ratio
+main_B <- ggplot(results,aes(timepoint,amplitude_ratio,fill=timepoint))+
+  geom_boxplot(width=0.5,outlier.shape=NA,alpha=0.7)+
+  geom_line(aes(group=patient),colour="grey80",linewidth=0.3)+
+  geom_point(size=1.3)+
+  scale_fill_manual(values=plot_colours)+
+  scale_x_discrete(labels=plot_labels)+
+  labs(x=NULL,y="Amplitude ratio",title=paste0("Wilcoxon p = ",sprintf("%.3f",amp_ratio_test$p.value)))+
+  theme_classic(base_size=10)+
+  theme(legend.position="none",plot.title=element_text(size=8,hjust=0.5))
+
+#Panel C: entropy ratio
+main_C <- ggplot(results,aes(timepoint,entropy_ratio,fill=timepoint))+
+  geom_boxplot(width=0.5,outlier.shape=NA,alpha=0.7)+
+  geom_line(aes(group=patient),colour="grey80",linewidth=0.3)+
+  geom_point(size=1.3)+
+  scale_fill_manual(values=plot_colours)+
+  scale_x_discrete(labels=plot_labels)+
+  labs(x=NULL,y="Entropy ratio",title=paste0("Wilcoxon p = ",sprintf("%.3f",entropy_ratio_test$p.value)))+
+  theme_classic(base_size=10)+
+  theme(legend.position="none",plot.title=element_text(size=8,hjust=0.5))
+
+#Panel D: 121-bp amplitude
+component_121 <- components %>%
+  filter(component==121) %>%
+  mutate(timepoint=factor(timepoint,levels=c("BL","END")))
+
+p121 <- amp_tests$p_adj[amp_tests$component==121]
+
+main_D <- ggplot(component_121,aes(timepoint,amplitude,fill=timepoint))+
+  geom_boxplot(width=0.5,outlier.shape=NA,alpha=0.7)+
+  geom_line(aes(group=patient),colour="grey80",linewidth=0.3)+
+  geom_point(size=1.3)+
+  scale_fill_manual(values=plot_colours)+
+  scale_x_discrete(labels=plot_labels)+
+  labs(x=NULL,y="121-bp amplitude (%)",title=paste0("BH-adjusted p = ",sprintf("%.3f",p121)))+
+  theme_classic(base_size=10)+
+  theme(legend.position="none",plot.title=element_text(size=8,hjust=0.5))
+
+#Panel E: fragments 115-125 bp
+region121_plot <- region121 %>%
+  pivot_longer(c(BL,END),names_to="timepoint",values_to="percent") %>%
+  mutate(timepoint=factor(timepoint,levels=c("BL","END")))
+
+region121_test <- wilcox.test(region121$END,region121$BL,paired=TRUE,exact=FALSE)
+
+main_E <- ggplot(region121_plot,aes(timepoint,percent,fill=timepoint))+
+  geom_boxplot(width=0.5,outlier.shape=NA,alpha=0.7)+
+  geom_line(aes(group=patient),colour="grey80",linewidth=0.3)+
+  geom_point(size=1.3)+
+  scale_fill_manual(values=plot_colours)+
+  scale_x_discrete(labels=plot_labels)+
+  labs(x=NULL,y="Fragments 115-125 bp (%)",title=paste0("Wilcoxon p = ",sprintf("%.3f",region121_test$p.value)))+
+  theme_classic(base_size=10)+
+  theme(legend.position="none",plot.title=element_text(size=8,hjust=0.5))
+
+#Combine panels
+fragmentomics_figure <- main_A /
+  (main_B | main_C) /
+  (main_D | main_E) +
+  plot_layout(heights=c(0.8,1,1))+
+  plot_annotation(tag_levels="A")
+
+fragmentomics_figure
+
+#Save figure
+ggsave(file.path(figure_path,"Figure_fragmentomics.png"),fragmentomics_figure,width=10,height=9,dpi=600,bg="white")
+
+ggsave(file.path(figure_path,"Figure_fragmentomics.pdf"),fragmentomics_figure,width=10,height=9,bg="white")
+```
+
+## 5.2 Main figure
+
+```{r main-figure, fig.width=11, fig.height=9.5}
+main_panel <- (main_B | main_C) /
+  main_A /
+  (main_D | main_E) +
+  plot_layout(heights=c(1.15,0.70,1.15),guides="collect") +
+  plot_annotation(
+    tag_levels="A",
+    theme=theme(
+      plot.tag=element_text(size=13,face="bold"),
+      plot.background=element_rect(colour="black",fill="white",linewidth=0.8),
+      plot.margin=margin(8,8,8,8))) &
+  theme(
+    axis.title=element_text(size=10,face="bold"),
+    axis.text=element_text(size=8.5,colour="black"),
+    plot.title=element_text(size=9.5,face="plain",hjust=0.5,margin=margin(b=5)),
+    plot.margin=margin(6,9,6,9),
+    legend.position="bottom",
+    legend.direction="horizontal",
+    legend.title=element_blank(),
+    legend.text=element_text(size=9),
+    legend.key.width=grid::unit(8,"mm"),
+    legend.key.height=grid::unit(3.5,"mm"))
+
+main_panel
+
+ggsave(file.path(results_path,"main_fragmentomics.pdf"),main_panel,width=11,height=9.5,units="in",bg="white")
+
+ggsave(file.path(results_path,"main_fragmentomics.png"),main_panel,width=11,height=9.5,units="in",dpi=400,bg="white")
+```
+
+## 5.3 Supplementary figure
+
+```{r supplementary-figure, fig.width=11, fig.height=7.5}
+supp_theme <- theme_classic(base_size=10.5) +
+  theme(
+    axis.title=element_text(size=10,face="bold"),
+    axis.text=element_text(size=8.5,colour="black"),
+    plot.title=element_text(size=9.5,face="plain",hjust=0.5),
+    plot.margin=margin(7,9,7,9))
+
+#Panel A: fragment-size profile
+supp_A <- ggplot(profile,aes(size,freq,colour=timepoint)) +
+  geom_line(linewidth=0.8) +
+  scale_colour_manual(
+    values=timepoint_colours,
+    breaks=c("BL","END"),
+    labels=c("BL"="Baseline","END"="Post-RT"),
+    name=NULL) +
+  guides(colour=guide_legend(nrow=1)) +
+  labs(x="Fragment size (bp)",y="Frequency (%)") +
+  supp_theme
+
+#Panel B: entropy changes
+entropy_plot_df <- entropy_tests %>%
+  mutate(group=factor(group,levels=c("121/131","141/151","159","167+")))
+
+supp_B <- ggplot(entropy_plot_df,aes(group,change)) +
+  geom_hline(yintercept=0,linetype="dashed",colour="grey45",linewidth=0.4) +
+  geom_segment(aes(xend=group,y=0,yend=change),colour="grey70",linewidth=0.55) +
+  geom_point(shape=21,fill="grey75",colour="black",size=2.3,stroke=0.35) +
+  scale_y_continuous(n.breaks=5,expand=expansion(mult=c(0.15,0.15))) +
+  labs(x="Component group (bp)",y="Median entropy change\n(Post-RT - baseline)") +
+  supp_theme
+
+#Panel C: fragment-size changes
+size_change <- size_tests %>%
+  filter(size>=100,size<=140)
+
+supp_C <- ggplot(size_change,aes(size,change)) +
+  annotate("rect",xmin=115,xmax=125,ymin=-Inf,ymax=Inf,fill="grey88") +
+  geom_hline(yintercept=0,linetype="dashed",colour="grey45",linewidth=0.4) +
+  geom_segment(aes(xend=size,y=0,yend=change),colour="grey70",linewidth=0.35) +
+  geom_point(data=size_change %>% filter(p_adj>=0.05),shape=21,fill="grey75",colour="grey45",size=1.7,stroke=0.25) +
+  geom_point(data=size_change %>% filter(p_adj<0.05),shape=21,fill="black",colour="black",size=2.1,stroke=0.25) +
+  scale_x_continuous(breaks=seq(100,140,5)) +
+  scale_y_continuous(n.breaks=5,expand=expansion(mult=c(0.12,0.12))) +
+  labs(x="Fragment size (bp)",y="Median frequency change\n(Post-RT - baseline, %)") +
+  supp_theme
+
+#Combine panels
+supp_panel <- supp_A /
+  (supp_B | supp_C) +
+  plot_layout(heights=c(1.05,1),guides="collect") +
+  plot_annotation(
+    tag_levels="A",
+    theme=theme(
+      plot.tag=element_text(size=13,face="bold"),
+      plot.background=element_rect(colour="black",fill="white",linewidth=0.8),
+      plot.margin=margin(8,8,8,8))) &
+  theme(
+    legend.position="bottom",
+    legend.direction="horizontal",
+    legend.title=element_blank(),
+    legend.text=element_text(size=9),
+    legend.key.width=grid::unit(8,"mm"),
+    legend.key.height=grid::unit(3.5,"mm"))
+
+supp_panel
+
+ggsave(file.path(results_path,"supplementary_fragmentomics.pdf"),supp_panel,width=11,height=7.5,units="in",bg="white")
+
+ggsave(file.path(results_path,"supplementary_fragmentomics.png"),supp_panel,width=11,height=7.5,units="in",dpi=400,bg="white")
+```
+
+## 5.4 Combined fragmentomics panel
+
+```{r full-fragmentomics-panel-compact, fig.width=10, fig.height=9}
+design <- "
+AAABBB
+CCDDEE
+#FFGG#
+"
+
+full_panel <- wrap_plots(supp_A,main_A,main_B,main_C,supp_B,main_D,main_E,design = design,guides = "collect") +
+  plot_annotation(tag_levels = "A") &
+  theme(
+    axis.title = element_text(size = 9, face = "bold"),
+    axis.text = element_text(size = 7.5, colour = "black"),
+    plot.title = element_text(size = 8, hjust = 0.5),
+    plot.margin = margin(4, 5, 4, 5),
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 8))
+
+full_panel
+```
+
+## 5.5 Save combined panel
+
+```{r save-full-fragmentomics-panel}
+ggsave(file.path(figure_path,"fragmentomics_full_panel.pdf"),full_panel,width=11,height=8,units="in",bg="white")
+
+ggsave(file.path(figure_path,"fragmentomics_full_panel.png"),full_panel,width=11,height=8,units="in",dpi=400,bg="white")
+```

@@ -1,0 +1,24 @@
+# Local data, configuration and runtime products (not supplementary source)
+.nextflow/
+.nextflow.log*
+work/
+results/
+.nextflow.*
+__pycache__/
+*.pyc
+.env
+params.local.json
+samplesheet.local.tsv
+site.config
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+*.bam
+*.bai
+*.cram
+*.crai
+*.vcf
+*.vcf.gz
+.DS_Store
+Thumbs.db

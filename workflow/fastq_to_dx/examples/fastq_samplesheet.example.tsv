@@ -1,0 +1,2 @@
+sample	patient	endpoint	fastq_1	fastq_2
+DEMO_BL_LIB_RUN_RUN001_S1_L001	DEMO	BL	/replace/with/fastq/DEMO_BL_LIB_RUN_RUN001_S1_L001_R1.fastq.gz	/replace/with/fastq/DEMO_BL_LIB_RUN_RUN001_S1_L001_R2.fastq.gz
